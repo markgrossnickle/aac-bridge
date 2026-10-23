@@ -1,0 +1,45 @@
+{
+  "name": "aac-bridge",
+  "version": "0.1.0",
+  "description": "Let any web game listen to what a person selects on an AAC board. A small open protocol, a game-side listener, an AAC-app-side sender, and a relay.",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./protocol": "./src/protocol.js",
+    "./vocabulary": "./src/vocabulary.js"
+  },
+  "files": [
+    "src",
+    "PROTOCOL.md",
+    "PRIVACY.md",
+    "docs"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test test/protocol.test.js test/vocabulary.test.js test/listener-emitter.test.js",
+    "test:relay": "cd relay && npm test",
+    "examples": "npx --yes http-server@14.1.1 . -p 5180 -c-1"
+  },
+  "keywords": [
+    "aac",
+    "augmentative and alternative communication",
+    "accessibility",
+    "games",
+    "cboard",
+    "postmessage",
+    "websocket"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/markgrossnickle/aac-bridge.git"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

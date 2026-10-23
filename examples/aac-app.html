@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>aac-bridge example AAC app</title>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f5f3ee; color: #222; }
+    header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #fff; border-bottom: 1px solid #ddd; }
+    #bar { flex: 1; min-height: 44px; display: flex; gap: 6px; align-items: center; padding: 0 8px; border: 1px solid #ccc; border-radius: 8px; }
+    #sharing { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: #eee; }
+    #sharing.on { background: #4fd1a5; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; padding: 16px; }
+    .tile { aspect-ratio: 1; border: 0; border-radius: 14px; background: #fff176; font-size: 22px; font-weight: 700; cursor: pointer; }
+    button.small { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <label><input type="checkbox" id="share" /> Share what I say with a game</label>
+    <span id="sharing">not sharing</span>
+    <div id="bar"></div>
+    <button class="small" id="speak">Speak</button>
+    <button class="small" id="clear">Clear</button>
+  </header>
+  <div class="grid" id="grid"></div>
+  <script type="module">
+    import { createAacEmitter, broadcastTransport, relayTransport } from "../src/index.js";
+
+    // Same transport switch as examples/game.html.
+    const q = new URLSearchParams(location.search);
+    const transport = q.get("relay")
+      ? relayTransport({ url: q.get("relay"), room: q.get("room") || "demo-room", role: "sender" })
+      : broadcastTransport();
+
+    const share = createAacEmitter({ app: { app: "example-aac", version: "0.1.0", lang: "en" }, transport });
+
+    // Consent: nothing is sent until the user ticks the box.
+    const box = document.getElementById("share");
+    const badge = document.getElementById("sharing");
+    box.addEventListener("change", () => {
+      box.checked ? share.enable() : share.disable();
+      badge.textContent = box.checked ? "sharing with game" : "not sharing";
+      badge.classList.toggle("on", box.checked);
+    });
+
+    const WORDS = ["yes", "no", "eat", "drink", "more", "help", "play", "stop", "go", "like", "happy", "sad"];
+    const bar = document.getElementById("bar");
+    let message = [];
+    for (const w of WORDS) {
+      const b = document.createElement("button");
+      b.className = "tile";
+      b.textContent = w;
+      b.addEventListener("click", () => {
+        const symbol = { text: w, key: `example.${w}`, id: `t-${w}` };
+        message.push(symbol);
+        bar.textContent = message.map((s) => s.text).join(" ");
+        share.symbol(symbol, { boardId: "home" });
+      });
+      document.getElementById("grid").appendChild(b);
+    }
+    document.getElementById("speak").addEventListener("click", () => {
+      if (!message.length) return;
+      share.phrase(message.map((s) => s.text).join(" "), message);
+    });
+    document.getElementById("clear").addEventListener("click", () => {
+      message = [];
+      bar.textContent = "";
+    });
+  </script>
+</body>
+</html>
