@@ -5,15 +5,18 @@ You need three things: one emitter, a settings switch that calls `enable()` and
 place your app already handles a selection.
 
 ```js
-import { createAacEmitter, relayTransport, postMessageTransport } from "aac-bridge";
+import { createAacEmitter, relayTransport, claimPairing, revokePairing } from "aac-bridge";
+
+// In settings: the user types (or scans) the 6-digit code the game shows.
+const RELAY = "https://relay.example.org";
+const { senderToken } = await claimPairing({ relay: RELAY, code: enteredCode });
+secureStore.set("aacBridgeToken", senderToken); // a secret: never in a URL or log
 
 const share = createAacEmitter({
   app: { app: "myaac", version: APP_VERSION, lang: currentLanguage },
-  transports: [
-    // Chosen and paired in settings, never from a URL parameter.
-    relayTransport({ url: "wss://relay.example.org/", room: pairingCode, role: "sender" }),
-  ],
+  transports: [relayTransport({ relay: RELAY, token: senderToken })],
 });
+// "Forget this game": await revokePairing({ relay: RELAY, token: senderToken });
 
 settings.onShareChange((on) => (on ? share.enable() : share.disable()));
 i18n.onChange((lang) => share.setLang(lang));
@@ -84,8 +87,9 @@ What that needs from Cboard:
    `label`). Resolve it with `intl.formatMessage` where the action is
    dispatched, as the output bar already does in `translateOutput`.
 3. **A Settings entry**, next to the existing navigation settings: "Share
-   what I say with a game", a pairing code field or QR scan for the relay, an
-   on/off switch, and an indicator in the board header while sharing.
+   what I say with a game", a field (or QR scan) for the game's 6-digit code
+   that calls `claimPairing`, an on/off switch, a "forget" button that calls
+   `revokePairing`, and an indicator in the board header while sharing.
 4. **Native builds.** In the Cordova Android app, the WebSocket relay works
    unchanged. A local Android broadcast intent carrying the same JSON is a
    later option for offline, same-device play.

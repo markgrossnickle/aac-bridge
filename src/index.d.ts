@@ -64,7 +64,7 @@ export interface Vocabulary {
 }
 export declare function createVocabulary(entries?: VocabularyEntry[]): Vocabulary;
 
-export type TransportState = "connecting" | "open" | "closed" | "error";
+export type TransportState = "connecting" | "open" | "closed" | "error" | "revoked" | "unauthorized";
 export interface Transport {
   name: string;
   start(handlers?: { message?: (data: unknown, meta?: object) => void; status?: (state: TransportState, detail?: string) => void }): void;
@@ -74,8 +74,14 @@ export interface Transport {
 type WindowLike = Window | HTMLIFrameElement | (() => Window | HTMLIFrameElement | null | undefined);
 export declare function postMessageTransport(opts: { origin: string | string[]; source?: WindowLike; target?: WindowLike; win?: Window }): Transport;
 export declare function broadcastTransport(opts?: { channel?: string }): Transport;
-export declare function relayTransport(opts: { url: string; room: string; role?: "listener" | "sender"; WebSocketImpl?: typeof WebSocket; maxQueue?: number }): Transport;
+export declare function relayTransport(opts: { url?: string; relay?: string; token: string; WebSocketImpl?: typeof WebSocket; maxQueue?: number; queueTtlMs?: number }): Transport;
 export declare function memoryLink(): { sender: Transport; listener: Transport };
+
+export interface Pairing { code: string; listenerToken: string; codeExpiresAt: number; expiresAt: number }
+export declare function createPairing(opts: { relay: string; fetchImpl?: typeof fetch }): Promise<Pairing>;
+export declare function claimPairing(opts: { relay: string; code: string; fetchImpl?: typeof fetch }): Promise<{ senderToken: string; expiresAt: number }>;
+export declare function revokePairing(opts: { relay: string; token: string; fetchImpl?: typeof fetch }): Promise<void>;
+export declare function relaySocketUrl(relay: string): string;
 
 export interface SymbolDetail { symbol: AacSymbol; boardId?: string; word: string | null; text: string; source: AacSource; event: SymbolSelectEvent; meta: object }
 export interface ListenerEvents {
@@ -87,6 +93,7 @@ export interface ListenerEvents {
   bye: { session: string; event: ByeEvent };
   status: { state: "idle" | TransportState; transport: string; transportState: TransportState; detail?: string };
   gap: { session: string; expected: number; got: number };
+  stale: { ageMs: number; event: AacEvent };
   "*": unknown;
 }
 export interface AacListener {
@@ -103,6 +110,7 @@ export declare function createAacListener(opts?: {
   transports?: Transport[];
   vocabulary?: VocabularyEntry[] | Vocabulary;
   onInvalid?: (reason: string, raw: unknown) => void;
+  maxAgeMs?: number;
 }): AacListener;
 
 export interface AacEmitter {

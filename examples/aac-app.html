@@ -25,20 +25,35 @@
   </header>
   <div class="grid" id="grid"></div>
   <script type="module">
-    import { createAacEmitter, broadcastTransport, relayTransport } from "../src/index.js";
+    import { createAacEmitter, broadcastTransport, relayTransport, claimPairing } from "../src/index.js";
 
-    // Same transport switch as examples/game.html.
+    // Same transport switch as examples/game.html. With ?relay=..., ticking the
+    // box asks for the code the game shows, then pairs.
     const q = new URLSearchParams(location.search);
-    const transport = q.get("relay")
-      ? relayTransport({ url: q.get("relay"), room: q.get("room") || "demo-room", role: "sender" })
-      : broadcastTransport();
-
-    const share = createAacEmitter({ app: { app: "example-aac", version: "0.1.0", lang: "en" }, transport });
+    let share = null;
+    async function makeEmitter() {
+      let transport = broadcastTransport();
+      if (q.get("relay")) {
+        const code = prompt("Enter the 6-digit code shown by the game");
+        const { senderToken } = await claimPairing({ relay: q.get("relay"), code });
+        transport = relayTransport({ relay: q.get("relay"), token: senderToken });
+      }
+      return createAacEmitter({ app: { app: "example-aac", version: "0.2.0", lang: "en" }, transport });
+    }
 
     // Consent: nothing is sent until the user ticks the box.
     const box = document.getElementById("share");
     const badge = document.getElementById("sharing");
-    box.addEventListener("change", () => {
+    box.addEventListener("change", async () => {
+      if (box.checked && !share) {
+        try {
+          share = await makeEmitter();
+        } catch (err) {
+          box.checked = false;
+          badge.textContent = `pairing failed: ${err.message}`;
+          return;
+        }
+      }
       box.checked ? share.enable() : share.disable();
       badge.textContent = box.checked ? "sharing with game" : "not sharing";
       badge.classList.toggle("on", box.checked);
@@ -55,13 +70,13 @@
         const symbol = { text: w, key: `example.${w}`, id: `t-${w}` };
         message.push(symbol);
         bar.textContent = message.map((s) => s.text).join(" ");
-        share.symbol(symbol, { boardId: "home" });
+        share?.symbol(symbol, { boardId: "home" });
       });
       document.getElementById("grid").appendChild(b);
     }
     document.getElementById("speak").addEventListener("click", () => {
       if (!message.length) return;
-      share.phrase(message.map((s) => s.text).join(" "), message);
+      share?.phrase(message.map((s) => s.text).join(" "), message);
     });
     document.getElementById("clear").addEventListener("click", () => {
       message = [];

@@ -16,14 +16,19 @@ const RECENT_IDS = 500;
  * @param {object[]} [opts.transports] several transports (all are listened to)
  * @param {Array|object} [opts.vocabulary] word list, or a createVocabulary() result
  * @param {(reason: string, raw: unknown) => void} [opts.onInvalid] called for rejected messages
+ * @param {number} [opts.maxAgeMs] drop selections older than this (default 5000; 0 disables).
+ *   Measured against the sender's clock with the session's clock offset removed,
+ *   so devices with different clocks still work.
  */
-export function createAacListener({ transport, transports, vocabulary, onInvalid } = {}) {
+export function createAacListener({ transport, transports, vocabulary, onInvalid, maxAgeMs = 5000 } = {}) {
   const list = transports ?? (transport ? [transport] : []);
   const vocab = vocabulary && typeof vocabulary.match === "function" ? vocabulary : vocabulary ? createVocabulary(vocabulary) : null;
   const handlers = new Map();
   const seen = new Set();
   const seenOrder = [];
   const lastSeq = new Map();
+  const clockOffset = new Map(); // session -> smallest (arrival - ts) seen
+  const ended = new Set(); // sessions that said bye; later messages are ignored
   const statuses = new Map();
   let source = null;
   let closed = false;
@@ -59,6 +64,18 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
     const e = res.event;
     if (seen.has(e.id)) return;
     remember(e.id);
+    if (ended.has(e.session)) return;
+
+    // Stale check: a command that arrives seconds late (queued behind a bad
+    // connection) would act on a game state the player no longer sees.
+    const arrival = Date.now();
+    const offset = Math.min(clockOffset.get(e.session) ?? Infinity, arrival - e.ts);
+    clockOffset.set(e.session, offset);
+    const age = arrival - e.ts - offset;
+    if (maxAgeMs > 0 && age > maxAgeMs && (e.type === EVENT.SYMBOL || e.type === EVENT.PHRASE || e.type === EVENT.BOARD)) {
+      emit("stale", { ageMs: age, event: e });
+      return;
+    }
 
     const prev = lastSeq.get(e.session);
     if (prev !== undefined && e.seq > prev + 1) emit("gap", { session: e.session, expected: prev + 1, got: e.seq });
@@ -70,6 +87,8 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
         emit("hello", { source, event: e });
         break;
       case EVENT.BYE:
+        ended.add(e.session);
+        if (source && source.session === e.session) source = null;
         emit("bye", { session: e.session, event: e });
         break;
       case EVENT.SYMBOL: {
@@ -93,6 +112,7 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
   const overall = () => {
     const values = [...statuses.values()];
     if (values.includes("open")) return "open";
+    if (values.length && values.every((v) => v === "revoked" || v === "unauthorized")) return values.includes("revoked") ? "revoked" : "unauthorized";
     if (values.includes("connecting")) return "connecting";
     if (values.includes("error")) return "error";
     return values.length ? "closed" : "idle";
@@ -109,7 +129,7 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
   });
 
   return {
-    /** Subscribe: "word", "symbol", "phrase", "board", "hello", "bye", "status", "gap", or "*". Returns an unsubscribe function. */
+    /** Subscribe: "word", "symbol", "phrase", "board", "hello", "bye", "status", "gap", "stale", or "*". Returns an unsubscribe function. */
     on(name, fn) {
       if (!handlers.has(name)) handlers.set(name, new Set());
       handlers.get(name).add(fn);

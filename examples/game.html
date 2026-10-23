@@ -25,14 +25,20 @@
     <div id="phrase"></div>
   </main>
   <script type="module">
-    import { createAacListener, broadcastTransport, relayTransport, mountDevPanel } from "../src/index.js";
+    import { createAacListener, broadcastTransport, relayTransport, createPairing, mountDevPanel } from "../src/index.js";
 
     // Default: another tab of this site (examples/aac-app.html) over BroadcastChannel.
-    // ?relay=ws://localhost:8787/&room=demo-room : through the relay instead.
+    // ?relay=http://localhost:8787 : pair through a relay instead. The game shows a
+    // one-time code; type it into the AAC app.
     const q = new URLSearchParams(location.search);
-    const transport = q.get("relay")
-      ? relayTransport({ url: q.get("relay"), room: q.get("room") || "demo-room" })
-      : broadcastTransport();
+    let transport;
+    if (q.get("relay")) {
+      const pairing = await createPairing({ relay: q.get("relay") });
+      document.getElementById("status").textContent = `pairing code: ${pairing.code}`;
+      transport = relayTransport({ relay: q.get("relay"), token: pairing.listenerToken });
+    } else {
+      transport = broadcastTransport();
+    }
 
     const WORDS = ["yes", "no", "eat", "drink", "more", "help", "play", "stop", "go", "like"];
     const aac = createAacListener({ transport, vocabulary: WORDS });

@@ -69,11 +69,41 @@ The envelope is the same on every transport.
 | Transport | Use | Rules |
 |---|---|---|
 | `window.postMessage` | AAC app and game in one page (one embeds the other in an iframe). | Sender passes the game's exact origin, never `"*"`. Listener checks `event.origin` against an allow list. |
-| WebSocket relay | AAC app and game on different devices, or in different native apps. | Both join a room with a short code; sender connects with `role=sender`, games with `role=listener`. The relay forwards sender to listeners only. Use `wss://` outside a LAN. |
+| WebSocket relay | AAC app and game on different devices, or in different native apps. | Paired first (below). The relay forwards sender to listeners only. Use `wss://` outside a LAN. |
 | `BroadcastChannel` (`aac-bridge`) | Same origin only: development, or app and game served by one site. | None beyond same-origin. |
 
 Native wrappers (for example an Android broadcast intent) may carry the same
 JSON string unchanged.
+
+## Relay pairing
+
+Knowing a room name is not authorization, so the relay has no rooms. Instead:
+
+1. The game calls `POST /pairings` and gets a one-time 6-digit `code` (valid
+   10 minutes) and a secret `listenerToken`. It shows the code.
+2. The user or caregiver enters the code in the AAC app, which calls
+   `POST /pairings/claim` with `{ "code" }` and gets a secret `senderToken`.
+   A code can be claimed once; claims are rate limited.
+3. Each side opens a WebSocket to the relay and sends
+   `{ "relay": "auth", "token": "..." }` as its first message. Tokens never
+   appear in URLs. The relay answers `{ "relay": "ok", "role": "sender" | "listener" }`.
+   Only the sender token may send; messages go to the listeners of that
+   pairing only.
+4. Either side ends it with `DELETE /pairings` and `Authorization: Bearer <token>`.
+   Both are disconnected (close code 4403) and both tokens stop working.
+   Unused pairings expire (idle 30 minutes, at most 12 hours).
+
+Close codes: 4401 bad or expired token, 4403 revoked, 4408 no authentication
+in time, 4409 replaced by a newer sender connection.
+
+## Delivery guarantees
+
+Senders must not deliver anything after sharing is turned off: stopping
+sharing discards anything not yet sent. Messages waiting on a slow connection
+are dropped after a few seconds rather than delivered late, and listeners drop
+selections more than a few seconds old (measured against the sender's clock
+with the session's offset removed). Late commands act on a game state the
+player no longer sees.
 
 ## Consent
 

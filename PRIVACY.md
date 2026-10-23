@@ -15,9 +15,11 @@ suggestions.
 3. **Visible while on.** Show that sharing is active and to what ("Sharing with
    Bubble Game"). Turning it off is one action and sends `session.bye`.
 4. **Exact destinations.** `postMessage` uses the game's exact origin, never
-   `"*"`. Relays are chosen in settings, use `wss://`, and are paired with a short
-   code the user enters or scans.
-5. **Send the minimum.** Symbol text, optional key and image, the board id. No
+   `"*"`. Relays are chosen in settings, use `wss://`, and are paired with a
+   one-time code the user enters or scans. Store the token like a password.
+5. **Off means off.** `disable()` discards anything queued and stops
+   reconnecting before it returns. Do not keep a copy to send later.
+6. **Send the minimum.** Symbol text, optional key and image, the board id. No
    user ids, no names, no history.
 
 ## For games and listeners
@@ -31,9 +33,10 @@ suggestions.
 
 ## For relay operators
 
-The reference relay (`relay/server.js`) forwards in one direction only,
-limits message size and rate, keeps rooms only while connected, and logs
-nothing but join and leave counts. If you run one, keep it that way, serve it
+The reference relay (`relay/server.js`) only connects paired devices (one-time
+code, separate secret tokens per side, revocable, expiring), forwards in one
+direction only, limits message size, rate and claim attempts, keeps
+everything in memory, and logs nothing but counts. If you run one, keep it that way, serve it
 over TLS, and set `ALLOWED_ORIGINS`.
 
 ## Reporting a problem

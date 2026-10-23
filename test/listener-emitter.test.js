@@ -122,6 +122,68 @@ test("postMessageTransport refuses '*' and filters by origin", () => {
   listener.close();
 });
 
+test("disable() stops every transport so queued speech is discarded", () => {
+  const log = [];
+  const fake = {
+    name: "fake",
+    queued: [],
+    started: 0,
+    stopped: 0,
+    start() {
+      this.started++;
+    },
+    send(e) {
+      this.queued.push(e);
+    },
+    stop() {
+      this.stopped++;
+      this.queued = [];
+      log.push("stop");
+    },
+  };
+  const out = createAacEmitter({ app, transport: fake });
+  out.enable();
+  out.symbol({ text: "private" });
+  out.disable();
+  assert.equal(fake.stopped, 1);
+  assert.deepEqual(fake.queued, []);
+  assert.equal(out.symbol({ text: "after" }), false);
+  out.enable();
+  assert.equal(fake.started, 2, "re-enable restarts transports");
+});
+
+test("messages after a session says bye are ignored", () => {
+  const link = memoryLink();
+  const listener = createAacListener({ transport: link.listener });
+  const words = [];
+  listener.on("word", (d) => words.push(d.word));
+  const s = { session: "s9", source: app };
+  listener.inject(createEvent(EVENT.HELLO, { capabilities: [] }, { ...s, seq: 0 }));
+  listener.inject(createEvent(EVENT.SYMBOL, { symbol: { text: "one" } }, { ...s, seq: 1 }));
+  listener.inject(createEvent(EVENT.BYE, {}, { ...s, seq: 2 }));
+  listener.inject(createEvent(EVENT.SYMBOL, { symbol: { text: "late" } }, { ...s, seq: 3 }));
+  assert.deepEqual(words, ["one"]);
+  assert.equal(listener.source, null);
+});
+
+test("stale selections expire, measured with the session's clock offset", () => {
+  const listener = createAacListener({ maxAgeMs: 2000 });
+  const words = [];
+  const stale = [];
+  listener.on("word", (d) => words.push(d.word));
+  listener.on("stale", (d) => stale.push(Math.round(d.ageMs / 1000)));
+  const now = Date.now();
+  // Sender clock runs 60 s ahead; the first message arrives promptly.
+  const skew = 60_000;
+  const s = { session: "clock", source: app };
+  listener.inject(createEvent(EVENT.HELLO, { capabilities: [] }, { ...s, seq: 0, ts: now + skew }));
+  listener.inject(createEvent(EVENT.SYMBOL, { symbol: { text: "fresh" } }, { ...s, seq: 1, ts: now + skew }));
+  // This one was created 10 s ago by the sender's clock: it sat in a queue.
+  listener.inject(createEvent(EVENT.SYMBOL, { symbol: { text: "late" } }, { ...s, seq: 2, ts: now + skew - 10_000 }));
+  assert.deepEqual(words, ["fresh"]);
+  assert.deepEqual(stale, [10]);
+});
+
 test("broadcastTransport delivers between channels", async () => {
   const listener = createAacListener({ transport: broadcastTransport({ channel: "t1" }) });
   const out = createAacEmitter({ app, transport: broadcastTransport({ channel: "t1" }) });

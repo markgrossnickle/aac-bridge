@@ -26,7 +26,6 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
     if (typeof t.send !== "function") throw new Error(`createAacEmitter: transport "${t.name}" cannot send`);
   }
   let enabled = false;
-  let started = false;
   let session = null;
   let seq = 0;
   const source = { ...app };
@@ -47,23 +46,25 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
   };
 
   return {
-    /** Start sharing (call only after the user agreed). Sends session.hello. */
+    /** Start sharing (call only after the user agreed). Starts the transports and sends session.hello. */
     enable() {
       if (enabled) return;
-      if (!started) {
-        for (const t of list) t.start?.({});
-        started = true;
-      }
+      for (const t of list) t.start?.({});
       enabled = true;
       session = randomId();
       seq = 0;
       send(EVENT.HELLO, { capabilities });
     },
-    /** Stop sharing. Sends session.bye first. */
+    /**
+     * Stop sharing. Sends session.bye if it can go out now, then stops every
+     * transport: anything still queued is discarded and no reconnect happens,
+     * so nothing the user said can be delivered after this returns.
+     */
     disable() {
       if (!enabled) return;
       send(EVENT.BYE, {});
       enabled = false;
+      for (const t of list) t.stop?.();
     },
     get enabled() {
       return enabled;
@@ -89,7 +90,6 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
     },
     close() {
       this.disable();
-      for (const t of list) t.stop?.();
     },
   };
 }

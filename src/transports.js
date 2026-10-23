@@ -3,7 +3,7 @@
 //
 // A transport is: { name, start({ message, status }), send?(event), stop() }
 //   message(data, meta)   called with each received message (object or string)
-//   status(state, detail) "connecting" | "open" | "closed" | "error"
+//   status(state, detail) "connecting" | "open" | "closed" | "error" | "revoked" | "unauthorized"
 
 export const DEFAULT_CHANNEL = "aac-bridge";
 
@@ -86,54 +86,92 @@ export function broadcastTransport({ channel = DEFAULT_CHANNEL } = {}) {
 }
 
 /**
- * WebSocket to an aac-bridge relay (see relay/). The AAC app connects as
- * "sender" and the game as "listener" with the same room code; the relay
- * forwards sender messages to listeners only. Reconnects with backoff.
+ * WebSocket to a paired aac-bridge relay (see relay/ and src/pairing.js).
+ * `token` is the secret from createPairing() (game) or claimPairing() (AAC app);
+ * it is sent as the first message, never in the URL, and decides the role.
+ *
+ * - Messages queued while disconnected are dropped once older than
+ *   `queueTtlMs`: a late "jump" is worse than none.
+ * - stop() clears the queue and cancels every reconnect, so nothing is sent
+ *   after sharing ends.
+ * - A revoked or expired pairing ends the transport for good (status
+ *   "revoked" or "unauthorized"); pair again to continue.
  */
-export function relayTransport({ url, room, role = "listener", WebSocketImpl, maxQueue = 50 } = {}) {
-  if (!url || !/^wss?:\/\//i.test(url)) throw new Error("relayTransport: url must start with ws:// or wss://");
-  if (!room || !/^[A-Za-z0-9_-]{4,64}$/.test(room)) throw new Error("relayTransport: room must be 4 to 64 letters, digits, _ or -");
-  if (role !== "listener" && role !== "sender") throw new Error('relayTransport: role is "listener" or "sender"');
+export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50, queueTtlMs = 3000 } = {}) {
+  let target = url ?? relay;
+  if (typeof target === "string" && /^https?:\/\//i.test(target)) target = target.replace(/\/+$/, "").replace(/^http/i, "ws") + "/";
+  if (!target || !/^wss?:\/\//i.test(target)) throw new Error("relayTransport: pass the relay url (wss://, or https:// which is converted)");
+  if (typeof token !== "string" || token.length < 16) throw new Error("relayTransport: pass the pairing token from createPairing() or claimPairing()");
   const WS = WebSocketImpl ?? globalThis.WebSocket;
   if (!WS) throw new Error("relayTransport: no WebSocket implementation");
-  const full = `${url}${url.includes("?") ? "&" : "?"}room=${encodeURIComponent(room)}&role=${role}`;
 
   let socket = null;
+  let authed = false;
   let stopped = true;
+  let finished = false;
   let delay = 500;
   let timer = null;
   let queue = [];
   let handlers = { message: noop, status: noop };
 
+  const fresh = () => {
+    const cutoff = Date.now() - queueTtlMs;
+    queue = queue.filter((q) => q.at >= cutoff);
+    return queue;
+  };
+
   const connect = () => {
-    if (stopped) return;
+    if (stopped || finished) return;
     handlers.status("connecting");
     let s;
     try {
-      s = new WS(full);
+      s = new WS(target);
     } catch (err) {
       handlers.status("error", String(err));
       schedule();
       return;
     }
     socket = s;
-    s.onopen = () => {
-      delay = 500;
-      handlers.status("open");
-      const pending = queue;
-      queue = [];
-      for (const m of pending) s.send(m);
+    authed = false;
+    s.onopen = () => s.send(JSON.stringify({ relay: "auth", token }));
+    s.onmessage = (ev) => {
+      const text = typeof ev.data === "string" ? ev.data : String(ev.data);
+      if (!authed) {
+        let msg = null;
+        try {
+          msg = JSON.parse(text);
+        } catch {
+          /* ignore */
+        }
+        if (msg && msg.relay === "ok") {
+          authed = true;
+          delay = 500;
+          handlers.status("open", msg.role);
+          const pending = fresh();
+          queue = [];
+          for (const q of pending) s.send(q.msg);
+        }
+        return;
+      }
+      handlers.message(text, { relay: true });
     };
-    s.onmessage = (ev) => handlers.message(typeof ev.data === "string" ? ev.data : String(ev.data), { room });
     s.onerror = () => handlers.status("error", "socket error");
-    s.onclose = () => {
+    s.onclose = (ev) => {
       socket = null;
+      authed = false;
+      const code = ev && ev.code;
+      if (code === 4401 || code === 4403) {
+        finished = true;
+        queue = [];
+        handlers.status(code === 4403 ? "revoked" : "unauthorized", ev.reason || "");
+        return;
+      }
       handlers.status("closed");
       schedule();
     };
   };
   const schedule = () => {
-    if (stopped) return;
+    if (stopped || finished) return;
     clearTimeout(timer);
     timer = setTimeout(connect, delay);
     delay = Math.min(delay * 2, 10_000);
@@ -143,23 +181,35 @@ export function relayTransport({ url, room, role = "listener", WebSocketImpl, ma
     name: "relay",
     start(h = {}) {
       handlers = { message: h.message ?? noop, status: h.status ?? noop };
+      if (finished) {
+        handlers.status("unauthorized", "pairing ended; pair again");
+        return;
+      }
       stopped = false;
       connect();
     },
     send(event) {
+      if (stopped || finished) return;
       const msg = typeof event === "string" ? event : JSON.stringify(event);
-      if (socket && socket.readyState === 1) socket.send(msg);
-      else if (queue.length < maxQueue) queue.push(msg);
+      if (socket && authed && socket.readyState === 1) socket.send(msg);
+      else if (fresh().length < maxQueue) queue.push({ msg, at: Date.now() });
     },
     stop() {
       stopped = true;
       clearTimeout(timer);
+      timer = null;
       queue = [];
       if (socket) {
         socket.onclose = null;
-        socket.close();
+        socket.onmessage = null;
+        try {
+          socket.close();
+        } catch {
+          /* already closed */
+        }
       }
       socket = null;
+      authed = false;
     },
   };
 }

@@ -26,15 +26,21 @@ Status: 0.1, draft protocol v1. Feedback from AAC app makers is very welcome.
 
 ## For game developers
 
+Not on npm yet. Pin a tagged release from GitHub:
+
 ```bash
-npm install aac-bridge
+npm install github:markgrossnickle/aac-bridge#v0.2.0
 ```
 
 ```js
-import { createAacListener, relayTransport, mountDevPanel } from "aac-bridge";
+import { createAacListener, createPairing, relayTransport, mountDevPanel } from "aac-bridge";
+
+// Once: ask the relay for a pairing, show the code, keep the token.
+const { code, listenerToken } = await createPairing({ relay: "https://relay.example.org" });
+showPairingCode(code); // the user types it into their AAC app
 
 const aac = createAacListener({
-  transport: relayTransport({ url: "wss://relay.example.org/", room: "bubbles-4821" }),
+  transport: relayTransport({ relay: "https://relay.example.org", token: listenerToken }),
   vocabulary: ["yes", "no", { word: "jump", synonyms: ["hop"] }, "more"],
 });
 
@@ -51,7 +57,8 @@ if (import.meta.env?.DEV) mountDevPanel({ listener: aac });
 Events: `word` (a selection that matched your vocabulary, or any selection if
 you gave none), `symbol` (every selection), `phrase` (the spoken message, with
 matched `words`), `board`, `hello` (who connected), `bye`, `status`, `gap`
-(messages were missed), and `*`.
+(messages were missed), `stale` (a selection arrived too late and was dropped),
+and `*`. After `bye` nothing more from that session is delivered.
 
 Matching is forgiving: case, punctuation and spacing are ignored, synonyms are
 supported, and a stable key such as `cboard.symbol.yes` matches `yes` even when
@@ -62,7 +69,7 @@ Transports:
 | | When | Listener |
 |---|---|---|
 | `postMessageTransport({ origin })` | AAC app embedded in your page (or yours in theirs) | `origin` is the AAC app's exact origin; `"*"` is refused |
-| `relayTransport({ url, room })` | AAC app on another device or in a native app | same `room` code as the AAC app |
+| `relayTransport({ relay, token })` | AAC app on another device or in a native app | the token from `createPairing()` |
 | `broadcastTransport()` | same site, other tab | none |
 | `memoryLink()` | tests, an on-page keyboard | none |
 
@@ -71,11 +78,12 @@ Always keep touch controls too. AAC is another way to play, not a gate.
 ## For AAC apps
 
 ```js
-import { createAacEmitter, relayTransport } from "aac-bridge";
+import { createAacEmitter, claimPairing, relayTransport } from "aac-bridge";
 
+const { senderToken } = await claimPairing({ relay: "https://relay.example.org", code: codeTheUserTyped });
 const share = createAacEmitter({
   app: { app: "myaac", version: "2.3.0", lang: "en-US" },
-  transports: [relayTransport({ url: "wss://relay.example.org/", room: pairingCode, role: "sender" })],
+  transports: [relayTransport({ relay: "https://relay.example.org", token: senderToken })],
 });
 shareSwitch.onchange = (on) => (on ? share.enable() : share.disable());
 
@@ -83,17 +91,21 @@ share.symbol({ text: "yes", key: "myaac.yes", id: tile.id, image: "https://..." 
 share.phrase("I want more juice", composedSymbols);
 ```
 
-Nothing is sent before `enable()`. Read `docs/for-aac-apps.md` (including
+Nothing is sent before `enable()`, and `disable()` discards anything not yet
+sent and stops reconnecting. Read `docs/for-aac-apps.md` (including
 notes for Cboard) and `PRIVACY.md` before shipping.
 
 ## Relay
 
 ```bash
-cd relay && npm install && npm start      # ws://localhost:8787/?room=<code>&role=<sender|listener>
+cd relay && npm install && npm start      # http://localhost:8787 (pairing) + ws://localhost:8787/ (streaming)
 ```
 
-One way only (sender to listeners), size and rate limited, no storage. Put it
-behind TLS and set `ALLOWED_ORIGINS` in production.
+Paired devices only (one-time code, a secret token per side, revocable,
+expiring), one way only (sender to listeners), size and rate limited, nothing
+stored. Put it behind TLS and set `ALLOWED_ORIGINS` in production. Hosts that
+cannot hold WebSockets open (for example Vercel functions) will not work; any
+small Node host will.
 
 ## Try it
 
@@ -103,8 +115,8 @@ npm run examples          # http://localhost:5180/examples/
 
 `examples/game.html` is a word game with the dev panel; open
 `examples/aac-app.html` in another tab of the same site and it drives the game
-over BroadcastChannel. Add `?relay=ws://localhost:8787/&room=demo-room` to both
-to go through the relay instead.
+over BroadcastChannel. Add `?relay=http://localhost:8787` to both to go through
+a local relay instead: the game shows a code, type it into the AAC app.
 
 ## Docs
 
