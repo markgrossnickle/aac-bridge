@@ -1,28 +1,32 @@
 name: CI
 
+# One cheap job on pull requests only (no matrix, no push trigger): the library
+# and relay tests take seconds. Run the same locally before opening a PR:
+#   npm test && (cd relay && npm install && npm test)
 on:
   pull_request:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: test
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [20, 22, 24]
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 22
       - name: Library tests (no dependencies)
         run: npm test
       - name: Relay tests
         working-directory: relay
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm test
