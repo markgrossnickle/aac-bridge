@@ -58,8 +58,25 @@ network. Two things to check in your runtime:
   native build (Cordova, Capacitor, a WebView) can usually allow it for local
   addresses; a website cannot without a relay certificate the device trusts.
 - **Finding the relay.** Typing the address works for a first test. A native
-  app can browse the local network for the relay (DNS-SD) instead, with the
-  pairing code still required.
+  app can browse the local network for relays (DNS-SD) instead.
+
+## Pairing without typing
+
+Typing six digits on an AAC device is hard. Offer, in this order:
+
+1. **Nearby games** (local relays). `listGames({ relay })` returns games
+   whose pairing dialog is open. Show them as big buttons; on a tap call
+   `requestPairing({ relay, game, app, device })` and show "Waiting for the
+   game to allow…" with Cancel. The game's user taps Allow. Never pair with
+   the first game found without a tap.
+2. **Scan the game's QR code.** `parsePairingLink(scannedText)` gives
+   `{ relay, code }`. Show which relay you are about to use, then
+   `claimPairing`.
+3. **Type the code**, as a fallback.
+
+Pairings the game makes with `remember: true` last until revoked (90 days
+after last use), so store the sender token and reconnect without asking again.
+"Forget this game" calls `revokePairing`.
 
 Bluetooth LE and WebRTC are planned transports (`PROTOCOL.md`). Either way
 the events, pairing code, sharing switch and revocation stay the same.
@@ -111,8 +128,8 @@ What that needs from Cboard:
    `label`). Resolve it with `intl.formatMessage` where the action is
    dispatched, as the output bar already does in `translateOutput`.
 3. **A Settings entry**, next to the existing navigation settings: "Share
-   what I say with a game", a field (or QR scan) for the game's 6-digit code
-   that calls `claimPairing`, an on/off switch, "Only the game's words" (on
+   what I say with a game", a list of nearby games to tap (tap-to-allow), a
+   QR scan and a field for the game's 6-digit code, an on/off switch, "Only the game's words" (on
    by default), a "forget" button that calls `revokePairing`, and an
    indicator in the board header while sharing.
 4. **Native builds.** In the Cordova Android app, the WebSocket relay works

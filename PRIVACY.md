@@ -24,8 +24,12 @@ suggestions.
 7. **Offer limited sharing.** When the game supplied its word list, offer
    "share only the game's words" (`limitTo()`), on by default. Unrelated
    speech then never leaves the device.
-8. **Nearby is not consent.** Local Wi-Fi or Bluetooth play needs the same
-   pairing code, visible sharing state and revocation as the internet.
+8. **Nearby is not consent.** Local Wi-Fi or Bluetooth play needs a pairing
+   chosen by a person (a code, a scanned QR, or tapping a listed game that its
+   user then allows), visible sharing state and revocation, the same as the
+   internet. Never pair with the first game found.
+9. **Links fill in, never act.** A QR code or link may fill in a pairing
+   code. It must not connect, choose a relay silently, or turn sharing on.
 
 ## For games and listeners
 
@@ -36,6 +40,9 @@ suggestions.
    `"*"`), and validate every message (the library does).
 3. **Never require AAC to play.** Offer touch as well; AAC input is an
    alternative, not a gate.
+4. **Ask before allowing.** For tap-to-allow pairing, show the requesting
+   app and device names (they are self-reported) and let the user allow or
+   deny. Allow only while the pairing dialog is open.
 
 ## For relay operators
 
@@ -48,6 +55,12 @@ capabilities), only while the sender is connected, so a game that joins late
 knows sharing is on. A game's word list is kept with its pairing. Run locally
 (`--serve`), nothing leaves the room. If you run one, keep it that way, serve it
 over TLS, and set `ALLOWED_ORIGINS`.
+
+Game discovery (`GET /games`) is on only for a local relay (`--serve`); on an
+internet relay it would list games to anyone. The list shows only games whose
+pairing dialog is open, by the name the game gave. Remembered pairings saved
+to disk are token hashes plus the game's name and word list: no tokens, no
+codes, nothing anyone said.
 
 ## Reporting a problem
 

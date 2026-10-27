@@ -87,6 +87,8 @@ must show "AAC connected" only for the second.
   disconnects, the relay tells listeners
   `{ "relay": "presence", "sender": true | false }`. A sender that closes
   without `session.bye` (closed app, lost network) shows up here.
+- **Pairing requests** (tap to allow) reach the game's listeners as
+  `request` and `request-done` control messages; see Relay pairing.
 - **Product states** a game can derive: *paired* (it holds a token), *reachable*
   (its relay connection is open), *sharing* (it has a hello for a live session
   and the sender is present), *ended* (`session.bye`, lost, or no longer
@@ -147,15 +149,34 @@ the carrier changes.
 
 ## Relay pairing
 
-Knowing a room name is not authorization, so the relay has no rooms. Instead:
+Knowing a room name, or being on the same Wi-Fi, is not authorization, so the
+relay has no rooms and nothing pairs by itself. Every pairing is chosen by a
+person on the AAC side and confirmed on the game side.
 
-1. The game calls `POST /pairings` (optionally with its `vocabulary`, see
-   Limited sharing) and gets a one-time 6-digit `code` (valid 10 minutes) and
-   a secret `listenerToken`. It shows the code.
-2. The user or caregiver enters the code in the AAC app, which calls
-   `POST /pairings/claim` with `{ "code" }` and gets a secret `senderToken`,
-   plus the game's `vocabulary` if it sent one. A code can be claimed once;
-   claims are rate limited.
+1. The game calls `POST /pairings` and gets a one-time 6-digit `code` (valid
+   10 minutes) and a secret `listenerToken`. Optional body fields:
+   `vocabulary` (see Limited sharing), `name` (shown to AAC apps),
+   `discoverable` (offer tap-to-allow, below), `remember` (see Remembered
+   pairings). The game shows the code, ideally with a QR code of a pairing
+   link, and keeps its dialog open.
+2. The AAC app gets a secret `senderToken` (plus the game's `vocabulary`
+   and `name`) in one of two ways:
+   - **Code.** The user types the code, or scans the QR, and the AAC app
+     calls `POST /pairings/claim` with `{ "code" }`. A code can be claimed
+     once; claims are rate limited.
+   - **Tap to allow** (local relays only). The AAC app lists
+     `GET /games` (games waiting in a discoverable pairing with their dialog
+     open), the user taps one, and the AAC app calls
+     `POST /pairings/request` with `{ "game", "app", "device" }`. The game
+     hears `{ "relay": "request", "request": { "id", "app", "device" } }`
+     on its socket and asks its user; it answers
+     `{ "relay": "approve" | "deny", "request": "<id>" }`. The AAC app polls
+     `GET /pairings/request/<id>` with `Authorization: Bearer <pollToken>`
+     until it gets `{ "status": "approved", "senderToken", ... }` (handed out
+     once) or `{ "status": "denied" }`. Requests expire after 2 minutes, a
+     game has at most 3 pending, and `app` and `device` are self-reported:
+     the game shows them, its user decides. Once a sender exists the pairing is
+     no longer listed and its code stops working.
 3. Each side opens a WebSocket to the relay and sends
    `{ "relay": "auth", "token": "..." }` as its first message. Tokens never
    appear in URLs. The relay answers `{ "relay": "ok", "role": "sender" | "listener" }`.
@@ -164,7 +185,19 @@ Knowing a room name is not authorization, so the relay has no rooms. Instead:
    control messages (see Presence and joining late).
 4. Either side ends it with `DELETE /pairings` and `Authorization: Bearer <token>`.
    Both are disconnected (close code 4403) and both tokens stop working.
-   Unused pairings expire (idle 30 minutes, at most 12 hours).
+   Ordinary pairings expire (idle 30 minutes, at most 12 hours).
+
+**Remembered pairings.** With `remember: true` a pairing lasts until someone
+revokes it, or 90 days after it was last used. Both sides keep their tokens,
+so after day one they reconnect with no pairing step at all. A relay with a
+state file (local play keeps one by default) saves remembered pairings across
+restarts, as token hashes only.
+
+**Pairing links (QR codes).** `pairingLink({ relay, code })` makes
+`<AAC page>#aac-pair=<code>&relay=<relay>`; `parsePairingLink()` reads it
+back. Opening or scanning a link only fills in the code: the user still
+confirms the connection and turns sharing on, and an AAC app should show which
+relay it is about to use.
 
 Close codes: 4401 bad or expired token, 4403 revoked, 4408 no authentication
 in time, 4409 replaced by a newer sender connection.

@@ -31,13 +31,22 @@ It prints two addresses:
 [aac-relay] AAC device:  http://192.168.1.20:8787/aac-bridge/examples/aac-app.html   (same Wi-Fi)
 ```
 
-1. On the computer, open the game site address and start pairing ("Connect AAC
-   board" in the AAC Game Playground hub). It shows a 6-digit code.
-2. On the AAC device, open the AAC device address, type the code, press
-   Connect, then turn on "Share what I say with the game". "Only the game's
-   words" is on by default.
-3. Press words. The game reacts. Turn sharing off or press "Forget this game"
+1. On the computer, open the game site address and tap "Connect AAC board"
+   in the AAC Game Playground hub. It shows a 6-digit code and a QR code, and
+   waits.
+2. On the AAC device, open the AAC device address. The game appears under
+   "Games nearby". Tap it.
+3. On the computer, the hub asks "Allow example-aac (Android device)?". Tap
+   Allow. (Or, on the AAC device, scan the QR code or type the 6-digit code.)
+4. On the AAC device, turn on "Share what I say with the game". "Only the
+   game's words" is on by default.
+5. Press words. The game reacts. Turn sharing off or press "Forget this game"
    to stop.
+
+**Only once.** The pairing is remembered on both devices, and by the relay
+across restarts (`~/.aac-bridge/relay-pairings.json`, token hashes only), until
+someone presses Forget or Disconnect, or it goes unused for 90 days. Next time,
+open both pages and turn sharing on.
 
 The AAC Game Playground wraps all of this as `npm run local`.
 
@@ -66,6 +75,8 @@ The AAC Game Playground wraps all of this as `npm run local`.
 - **One computer as the receiver.** A tablet or TV as the receiver, with no
   laptop, needs a native app that runs the relay itself (planned, see
   `PROTOCOL.md`).
+- **Nearby games show only on the local relay.** An internet relay never
+  lists games; there, pair with the code or the QR code.
 - **Not yet tested on real devices.** The relay, pairing and serving are
   covered by automated tests over real sockets. Home, school, guest and
   hotspot networks still need trying with real devices before any support

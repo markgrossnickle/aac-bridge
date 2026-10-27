@@ -1,6 +1,6 @@
 {
   "name": "aac-bridge-relay",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "description": "One-way WebSocket relay for aac-bridge: an AAC app on one device, games on another.",
   "type": "module",

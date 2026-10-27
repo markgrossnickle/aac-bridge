@@ -9,13 +9,16 @@
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--ink); }
     header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; background: var(--card); border-bottom: 1px solid #ddd; }
+    [hidden] { display: none !important; }
     #status { font-size: 14px; padding: 6px 12px; border-radius: 999px; background: #eee; }
     #status.on { background: var(--on); font-weight: 700; }
+    .panel { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+    .panel h2 { margin: 4px 0 0; font-size: 15px; color: var(--muted); font-weight: 600; }
+    #games { display: flex; flex-wrap: wrap; gap: 8px; }
+    .game { min-height: 48px; padding: 8px 16px; border-radius: 10px; border: 2px solid #4b7bec; background: #eef3ff; font-size: 17px; font-weight: 700; cursor: pointer; }
     #pair { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-    #pair[hidden] { display: none; }
     #pair input[type="text"] { width: 8.5em; font-size: 20px; letter-spacing: 0.15em; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; }
     label { display: inline-flex; gap: 6px; align-items: center; font-size: 15px; min-height: 44px; }
-    label[hidden] { display: none; }
     input[type="checkbox"] { width: 24px; height: 24px; }
     button.small { min-height: 44px; padding: 8px 14px; border-radius: 8px; border: 1px solid #bbb; background: #fff; font-size: 15px; cursor: pointer; }
     #bar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; min-height: 52px; }
@@ -29,9 +32,20 @@
 </head>
 <body>
   <header>
-    <div id="pair">
-      <input id="code" type="text" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="Code" aria-label="6-digit code from the game" />
-      <button class="small" id="connect">Connect</button>
+    <div class="panel" id="connectPanel" hidden>
+      <div id="nearby" hidden>
+        <h2>Games nearby: tap one, then allow it on the game's screen</h2>
+        <div id="games"></div>
+      </div>
+      <h2 id="codeTitle">Or type the code the game shows</h2>
+      <div id="pair">
+        <input id="code" type="text" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="Code" aria-label="6-digit code from the game" />
+        <button class="small" id="connect">Connect</button>
+      </div>
+    </div>
+    <div id="waiting" hidden>
+      <span id="waitingText">Waiting for the game to allow this board…</span>
+      <button class="small" id="cancelWait">Cancel</button>
     </div>
     <label><input type="checkbox" id="share" disabled /> Share what I say with the game</label>
     <label id="limitRow" hidden><input type="checkbox" id="limit" checked /> Only the game's words</label>
@@ -46,51 +60,109 @@
   <div class="grid" id="grid"></div>
   <p class="hint" id="hint"></p>
   <script type="module">
-    import { createAacEmitter, broadcastTransport, relayTransport, claimPairing, revokePairing } from "../src/index.js";
+    import {
+      createAacEmitter, broadcastTransport, relayTransport,
+      claimPairing, revokePairing, listGames, requestPairing, parsePairingLink,
+    } from "../src/index.js";
 
     // Where to pair. Served by an aac-bridge relay (local play, `--serve`),
     // the relay is this page's own origin. `?relay=` points elsewhere in
     // development. With no relay at all, it talks to games in other tabs of
     // this same site (BroadcastChannel).
     const q = new URLSearchParams(location.search);
+    let discovery = false;
     async function findRelay() {
-      if (q.get("relay")) return q.get("relay");
       try {
-        const r = await fetch("/healthz", { cache: "no-store" });
+        const r = await fetch(`${q.get("relay") ?? ""}/healthz`.replace(/^\/\//, "/"), { cache: "no-store" });
         const body = await r.json();
-        if (body && body.relay === "aac-bridge") return location.origin;
+        if (body && body.relay === "aac-bridge") {
+          discovery = Boolean(body.discovery);
+          return (q.get("relay") ?? location.origin).replace(/\/+$/, "");
+        }
       } catch {}
       return null;
     }
     const relay = await findRelay();
+    const APP = { app: "example-aac", version: "0.4.0", lang: "en" };
+    const DEVICE = /Android/i.test(navigator.userAgent) ? "Android device" : /iPad|iPhone/i.test(navigator.userAgent) ? "iPhone or iPad" : "computer";
     const STORE = "aac-bridge-example-pairing";
     const $ = (id) => document.getElementById(id);
-    const status = $("status");
     let share = null;
     let gameWords = null;
+    let gameName = "";
+    let waitAbort = null;
+    let listTimer = null;
 
     const read = () => { try { return JSON.parse(localStorage.getItem(STORE) || "null"); } catch { return null; } };
     const write = (v) => { try { v ? localStorage.setItem(STORE, JSON.stringify(v)) : localStorage.removeItem(STORE); } catch {} };
 
     function setStatus(text, on = false) {
-      status.textContent = text;
-      status.classList.toggle("on", on);
+      $("status").textContent = text;
+      $("status").classList.toggle("on", on);
     }
-    function sharingText() {
-      return share?.limited ? "sharing the game's words" : "sharing everything";
+    const sharingText = () => (share?.limited ? "sharing the game's words" : "sharing everything");
+    const withGame = (text) => (gameName ? `${text} (${gameName})` : text);
+
+    function showConnect(on) {
+      $("connectPanel").hidden = !on;
+      clearInterval(listTimer);
+      listTimer = null;
+      if (on && relay && discovery) {
+        refreshGames();
+        listTimer = setInterval(refreshGames, 3000);
+      }
     }
 
-    function ready(transport, words) {
+    async function refreshGames() {
+      let games = [];
+      try { games = await listGames({ relay }); } catch {}
+      $("nearby").hidden = games.length === 0;
+      $("codeTitle").textContent = games.length ? "Or type the code the game shows" : "Type the code the game shows";
+      $("games").replaceChildren(...games.map((g) => {
+        const b = document.createElement("button");
+        b.className = "game";
+        b.textContent = g.name;
+        b.addEventListener("click", () => askGame(g));
+        return b;
+      }));
+    }
+
+    async function askGame(g) {
+      showConnect(false);
+      $("waiting").hidden = false;
+      $("waitingText").textContent = `Waiting for "${g.name}" to allow this board…`;
+      waitAbort = new AbortController();
+      try {
+        const s = await requestPairing({ relay, game: g.id, app: APP.app, device: DEVICE, signal: waitAbort.signal });
+        paired(s);
+      } catch (err) {
+        $("waiting").hidden = true;
+        showConnect(true);
+        setStatus(err.reason === "denied" ? "the game said no" : err.reason === "cancelled" ? "not connected" : `could not connect: ${err.message}`);
+      } finally {
+        waitAbort = null;
+        $("waiting").hidden = true;
+      }
+    }
+    $("cancelWait").addEventListener("click", () => waitAbort?.abort());
+
+    function paired(s) {
+      write({ relay, senderToken: s.senderToken, vocabulary: s.vocabulary ?? null, name: s.name ?? "" });
+      ready(relayTransport({ relay, token: s.senderToken }), s.vocabulary, s.name);
+    }
+
+    function ready(transport, words, name = "") {
       share?.disable();
       gameWords = words && words.length ? words.map((w) => w.toLowerCase()) : null;
-      share = createAacEmitter({ app: { app: "example-aac", version: "0.3.0", lang: "en" }, transport });
+      gameName = name || "";
+      share = createAacEmitter({ app: APP, transport });
       $("share").disabled = false;
       $("share").checked = false;
       $("limitRow").hidden = !gameWords;
       $("forget").hidden = !relay;
-      $("pair").hidden = true;
+      showConnect(false);
       applyLimit();
-      setStatus("connected, not sharing");
+      setStatus(withGame("connected, not sharing"));
     }
     function applyLimit() {
       share?.limitTo(gameWords && $("limit").checked ? gameWords : null);
@@ -103,16 +175,26 @@
       $("hint").textContent = "No relay: sharing with games open in other tabs of this site.";
       ready(broadcastTransport(), null);
     } else {
-      $("hint").textContent = `Relay: ${relay}. Type the code the game shows, then turn sharing on.`;
+      $("hint").textContent = `Relay: ${relay}.`;
       const saved = read();
-      if (saved && saved.relay === relay) ready(relayTransport({ relay, token: saved.senderToken }), saved.vocabulary);
+      if (saved && saved.relay === relay) ready(relayTransport({ relay, token: saved.senderToken }), saved.vocabulary, saved.name);
+      else showConnect(true);
+      // Opened from a game's QR code: fill in the code, but connect only when
+      // the user taps Connect, and only for this page's own relay. A link must
+      // never pair or share on its own (PRIVACY.md).
+      const fromLink = parsePairingLink(location.href);
+      if (fromLink) {
+        history.replaceState(null, "", location.pathname + location.search);
+        if (fromLink.relay === relay && !read()) {
+          $("code").value = `${fromLink.code.slice(0, 3)} ${fromLink.code.slice(3)}`;
+          setStatus("code from the game's QR: tap Connect");
+        }
+      }
     }
 
     $("connect").addEventListener("click", async () => {
       try {
-        const claim = await claimPairing({ relay, code: $("code").value });
-        write({ relay, senderToken: claim.senderToken, vocabulary: claim.vocabulary ?? null });
-        ready(relayTransport({ relay, token: claim.senderToken }), claim.vocabulary);
+        paired(await claimPairing({ relay, code: $("code").value }));
       } catch (err) {
         setStatus(`pairing failed: ${err.message}`);
       }
@@ -123,25 +205,27 @@
     $("share").addEventListener("change", () => {
       if (!share) return;
       $("share").checked ? share.enable() : share.disable();
-      setStatus($("share").checked ? sharingText() : "connected, not sharing", $("share").checked);
+      setStatus(withGame($("share").checked ? sharingText() : "connected, not sharing"), $("share").checked);
     });
     $("limit").addEventListener("change", () => {
       applyLimit();
-      if (share?.enabled) setStatus(sharingText(), true);
+      if (share?.enabled) setStatus(withGame(sharingText()), true);
     });
     $("forget").addEventListener("click", async () => {
       const saved = read();
       share?.disable();
       share = null;
+      gameName = "";
       $("share").checked = false;
       $("share").disabled = true;
       if (saved) await revokePairing({ relay, token: saved.senderToken }).catch(() => {});
       write(null);
-      $("pair").hidden = false;
       $("forget").hidden = true;
       $("limitRow").hidden = true;
+      $("code").value = "";
       for (const b of document.querySelectorAll(".tile")) b.classList.remove("dim");
       setStatus("not connected");
+      showConnect(true);
     });
 
     const WORDS = ["go", "stop", "more", "again", "pop", "big", "red", "blue", "green", "yellow", "yes", "no", "help", "play", "eat", "sad"];
