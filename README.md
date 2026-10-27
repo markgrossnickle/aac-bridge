@@ -22,7 +22,7 @@ user's consent:
                                    └─ BroadcastChannel (same site)  ──┘
 ```
 
-Status: 0.1, draft protocol v1. Feedback from AAC app makers is very welcome.
+Status: 0.2.0, draft protocol v1. Feedback from AAC app makers is very welcome.
 
 ## For game developers
 
