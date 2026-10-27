@@ -9,6 +9,9 @@
 //   out.symbol({ text: "yes", key: "cboard.symbol.yes", id: "HJVQ", image: "https://..." }, { boardId: "root" });
 
 import { EVENT, createEvent, randomId, validateEvent } from "./protocol.js";
+import { createVocabulary } from "./vocabulary.js";
+
+const DEFAULT_CAPABILITIES = ["symbol.select", "phrase.speak", "board.change"];
 
 /**
  * @param {object} opts
@@ -16,8 +19,13 @@ import { EVENT, createEvent, randomId, validateEvent } from "./protocol.js";
  * @param {object[]} [opts.transports] transports with send()
  * @param {object} [opts.transport]
  * @param {string[]} [opts.capabilities] advertised in session.hello
+ * @param {number} [opts.helloEveryMs] repeat session.hello this often while
+ *   sharing (default 10000; 0 disables), so a game that opens later learns that
+ *   sharing is on, and notices when this app disappears without a bye.
+ * @param {Array|object|null} [opts.limitTo] share only these words (the game's
+ *   vocabulary, e.g. from claimPairing().vocabulary). See limitTo().
  */
-export function createAacEmitter({ app, transports, transport, capabilities = ["symbol.select", "phrase.speak", "board.change"] } = {}) {
+export function createAacEmitter({ app, transports, transport, capabilities = DEFAULT_CAPABILITIES, helloEveryMs = 10_000, limitTo = null } = {}) {
   if (!app || typeof app.app !== "string" || !app.app) {
     throw new Error('createAacEmitter: pass app: { app: "<name>", version?, lang? }');
   }
@@ -28,7 +36,21 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
   let enabled = false;
   let session = null;
   let seq = 0;
+  let timer = null;
+  let limit = null;
   const source = { ...app };
+
+  const setLimit = (entries) => {
+    limit = entries ? (typeof entries.match === "function" ? entries : createVocabulary(entries)) : null;
+  };
+  setLimit(limitTo);
+
+  const caps = () => {
+    const c = [...capabilities];
+    if (helloEveryMs > 0) c.push("session.heartbeat");
+    if (limit) c.push("sharing.limited");
+    return c;
+  };
 
   const send = (type, payload) => {
     if (!enabled) return false;
@@ -45,6 +67,11 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
     return true;
   };
 
+  const stopHeartbeat = () => {
+    clearInterval(timer);
+    timer = null;
+  };
+
   return {
     /** Start sharing (call only after the user agreed). Starts the transports and sends session.hello. */
     enable() {
@@ -53,7 +80,11 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
       enabled = true;
       session = randomId();
       seq = 0;
-      send(EVENT.HELLO, { capabilities });
+      send(EVENT.HELLO, { capabilities: caps() });
+      if (helloEveryMs > 0) {
+        timer = setInterval(() => send(EVENT.HELLO, { capabilities: caps() }), helloEveryMs);
+        timer.unref?.();
+      }
     },
     /**
      * Stop sharing. Sends session.bye if it can go out now, then stops every
@@ -62,6 +93,7 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
      */
     disable() {
       if (!enabled) return;
+      stopHeartbeat();
       send(EVENT.BYE, {});
       enabled = false;
       for (const t of list) t.stop?.();
@@ -73,19 +105,40 @@ export function createAacEmitter({ app, transports, transport, capabilities = ["
     setLang(lang) {
       source.lang = lang;
     },
-    /** A symbol (tile) was selected. `symbol.text` is the word as shown/spoken in the user's language. */
+    /**
+     * Share only selections that match these words (strings or { word,
+     * synonyms }, or a createVocabulary() result); null shares everything.
+     * While limited: unmatched symbols are not sent, board changes are not
+     * sent, and a phrase is sent as only its matching symbols.
+     */
+    limitTo(entries) {
+      setLimit(entries);
+      if (enabled) send(EVENT.HELLO, { capabilities: caps() });
+    },
+    /** Whether sharing is limited to a word list. */
+    get limited() {
+      return Boolean(limit);
+    },
+    /** A symbol (tile) was selected. `symbol.text` is the word as shown/spoken in the user's language. Returns whether it was sent. */
     symbol(symbol, { boardId } = {}) {
+      if (limit && !limit.match(symbol)) return false;
       return send(EVENT.SYMBOL, boardId ? { symbol, boardId } : { symbol });
     },
-    /** The user opened another board (folder). */
+    /** The user opened another board (folder). Not sent while limited. */
     board(boardId, { fromBoardId, symbol } = {}) {
+      if (limit) return false;
       const p = { boardId };
       if (fromBoardId) p.fromBoardId = fromBoardId;
       if (symbol) p.symbol = symbol;
       return send(EVENT.BOARD, p);
     },
-    /** The sentence/message bar was spoken. */
+    /** The sentence/message bar was spoken. While limited, only its matching symbols are sent. */
     phrase(text, symbols = []) {
+      if (limit) {
+        const kept = symbols.filter((s) => limit.match(s));
+        if (!kept.length) return false;
+        return send(EVENT.PHRASE, { text: kept.map((s) => s.text).join(" "), symbols: kept });
+      }
       return send(EVENT.PHRASE, { text, symbols });
     },
     close() {

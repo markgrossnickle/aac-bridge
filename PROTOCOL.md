@@ -53,7 +53,7 @@ A selectable item on a board (Cboard calls it a tile).
 
 | `type` | Payload | When |
 |---|---|---|
-| `session.hello` | `capabilities: string[]` (event types the app may send) | Sharing was turned on. Always the first message of a session. |
+| `session.hello` | `capabilities: string[]` (see below) | Sharing was turned on. Always the first message of a session; repeated while sharing when the app advertises `session.heartbeat`. |
 | `symbol.select` | `symbol`, `boardId?` | The user selected a symbol that adds to their message or speaks. |
 | `board.change` | `boardId`, `fromBoardId?`, `symbol?` (the folder symbol) | The user opened another board. |
 | `phrase.speak` | `text`, `symbols: Symbol[]` | The user spoke their composed message. |
@@ -61,6 +61,57 @@ A selectable item on a board (Cboard calls it a tile).
 
 Limits: `symbols` holds at most 100 entries, ids and keys at most 128
 characters, a whole message at most 64 KB.
+
+Capabilities in `session.hello`:
+
+| Capability | Meaning |
+|---|---|
+| `symbol.select`, `phrase.speak`, `board.change` | Event types the app may send. |
+| `session.heartbeat` | The app repeats `session.hello` (same session, next `seq`) about every 10 seconds while sharing. A listener that hears nothing from it for about 35 seconds may treat it as gone, even without a `session.bye`. |
+| `sharing.limited` | The user chose to share only the game's words (see Limited sharing). |
+
+## Presence and joining late
+
+"The channel is open" and "someone is sharing" are different facts. A game
+must show "AAC connected" only for the second.
+
+- **A listener that starts after sharing began** (a player moves from a hub
+  into a game, opens a second game, reloads) must still learn that sharing is
+  on. Senders with `session.heartbeat` repeat their hello, so any transport
+  catches up within one interval. The relay also does it at once: when a
+  listener authenticates while the paired sender is connected, the relay sends
+  `{ "relay": "replay", "event": <the sender's latest session.hello> }`.
+  Only the hello is kept and replayed, never a symbol, phrase or board.
+  Listeners skip the stale check and gap detection for a replayed hello.
+- **Relay presence.** On authentication, and whenever the sender connects or
+  disconnects, the relay tells listeners
+  `{ "relay": "presence", "sender": true | false }`. A sender that closes
+  without `session.bye` (closed app, lost network) shows up here.
+- **Product states** a game can derive: *paired* (it holds a token), *reachable*
+  (its relay connection is open), *sharing* (it has a hello for a live session
+  and the sender is present), *ended* (`session.bye`, lost, or no longer
+  present), *revoked* (the pairing is gone). The reference listener reports a
+  transport's own state with `statusOf(name)` and presence with `presenceOf(name)`,
+  separately from the overall channel status.
+
+## Limited sharing
+
+An AAC app may offer "share only the game's words". The game sends its word
+list when it creates a pairing (`POST /pairings` with
+`{ "vocabulary": ["go", "pop", ...] }`, up to 300 words of up to 64
+characters), and the AAC app receives it with the claim. While limited, the
+sender:
+
+- sends a `symbol.select` only if the symbol matches a word (by `text`,
+  `vocalization` or the last segment of `key`, ignoring case and punctuation);
+- sends no `board.change`;
+- sends a `phrase.speak` with only its matching symbols, and `text` rebuilt
+  from them;
+- advertises `sharing.limited` in its hello.
+
+The filtering happens on the AAC device, so unrelated speech never leaves it.
+The user chooses; limited is the recommended default when a game supplied a
+list.
 
 ## Transports
 
@@ -75,20 +126,42 @@ The envelope is the same on every transport.
 Native wrappers (for example an Android broadcast intent) may carry the same
 JSON string unchanged.
 
+### Local play without internet
+
+A relay does not have to be on the internet. `node relay/server.js --serve
+<built site>` runs the relay on a computer and also serves a built game site
+and an example AAC page from it, so a game on that computer and an AAC device
+on the same Wi-Fi pair and play with no internet. See `docs/local-play.md`.
+
+### Planned transports
+
+The envelope, pairing, consent and presence rules above stay the same; only
+the carrier changes.
+
+| Transport | Fits | Notes |
+|---|---|---|
+| Local relay in a native app | A tablet or TV app that should be the receiver with no laptop | The app runs the relay and advertises it on the network (DNS-SD). Needs native code on the receiving side. |
+| WebRTC data channel | Two browsers on one network | Needs a signaling step (QR codes or a relay) before the direct link; a direct path is not guaranteed. |
+| Bluetooth LE (custom GATT service) | Two native apps, or a native receiver and Chrome (Web Bluetooth) | Needs device roles, framing for messages larger than one packet, and the same pairing and revocation. |
+| Controller adapter (Bluetooth HID) | Existing games that only know keys or gamepads | Not an aac-bridge transport: a separate mapper turns chosen words into controller input. Validate each platform before claiming support. |
+
 ## Relay pairing
 
 Knowing a room name is not authorization, so the relay has no rooms. Instead:
 
-1. The game calls `POST /pairings` and gets a one-time 6-digit `code` (valid
-   10 minutes) and a secret `listenerToken`. It shows the code.
+1. The game calls `POST /pairings` (optionally with its `vocabulary`, see
+   Limited sharing) and gets a one-time 6-digit `code` (valid 10 minutes) and
+   a secret `listenerToken`. It shows the code.
 2. The user or caregiver enters the code in the AAC app, which calls
-   `POST /pairings/claim` with `{ "code" }` and gets a secret `senderToken`.
-   A code can be claimed once; claims are rate limited.
+   `POST /pairings/claim` with `{ "code" }` and gets a secret `senderToken`,
+   plus the game's `vocabulary` if it sent one. A code can be claimed once;
+   claims are rate limited.
 3. Each side opens a WebSocket to the relay and sends
    `{ "relay": "auth", "token": "..." }` as its first message. Tokens never
    appear in URLs. The relay answers `{ "relay": "ok", "role": "sender" | "listener" }`.
    Only the sender token may send; messages go to the listeners of that
-   pairing only.
+   pairing only. The relay also sends listeners `presence` and `replay`
+   control messages (see Presence and joining late).
 4. Either side ends it with `DELETE /pairings` and `Authorization: Bearer <token>`.
    Both are disconnected (close code 4403) and both tokens stop working.
    Unused pairings expire (idle 30 minutes, at most 12 hours).
@@ -114,6 +187,7 @@ URL parameter alone must never turn sharing on or choose where it goes. See
 
 ## Not in version 1, planned
 
-- Game to AAC app messages, for example a game offering the vocabulary it uses
-  as an Open Board Format board, or asking the app to show a board.
+- Game to AAC app messages during play, for example offering the game's
+  vocabulary as an Open Board Format board, or asking the app to show a
+  board. (The word list sent at pairing covers limited sharing today.)
 - Signed or encrypted messages for untrusted relays.

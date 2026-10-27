@@ -67,7 +67,12 @@ export declare function createVocabulary(entries?: VocabularyEntry[]): Vocabular
 export type TransportState = "connecting" | "open" | "closed" | "error" | "revoked" | "unauthorized";
 export interface Transport {
   name: string;
-  start(handlers?: { message?: (data: unknown, meta?: object) => void; status?: (state: TransportState, detail?: string) => void }): void;
+  start(handlers?: {
+    message?: (data: unknown, meta?: { replay?: boolean } & Record<string, unknown>) => void;
+    status?: (state: TransportState, detail?: string) => void;
+    /** Transports that know whether the AAC app is connected (the relay) report it here. */
+    presence?: (present: boolean) => void;
+  }): void;
   send?(event: unknown): void;
   stop(): void;
 }
@@ -78,8 +83,12 @@ export declare function relayTransport(opts: { url?: string; relay?: string; tok
 export declare function memoryLink(): { sender: Transport; listener: Transport };
 
 export interface Pairing { code: string; listenerToken: string; codeExpiresAt: number; expiresAt: number }
-export declare function createPairing(opts: { relay: string; fetchImpl?: typeof fetch }): Promise<Pairing>;
-export declare function claimPairing(opts: { relay: string; code: string; fetchImpl?: typeof fetch }): Promise<{ senderToken: string; expiresAt: number }>;
+/** Game side. Pass the game's `vocabulary` so the AAC app can offer "share only the game's words". */
+export declare function createPairing(opts: { relay: string; vocabulary?: VocabularyEntry[] | Vocabulary; fetchImpl?: typeof fetch }): Promise<Pairing>;
+/** AAC app side. `vocabulary` is the game's word list, if it sent one. */
+export declare function claimPairing(opts: { relay: string; code: string; fetchImpl?: typeof fetch }): Promise<{ senderToken: string; expiresAt: number; vocabulary?: string[] }>;
+/** Flatten vocabulary entries to the plain word list sent with a pairing. */
+export declare function vocabularyWords(entries?: VocabularyEntry[] | Vocabulary): string[] | undefined;
 export declare function revokePairing(opts: { relay: string; token: string; fetchImpl?: typeof fetch }): Promise<void>;
 export declare function relaySocketUrl(relay: string): string;
 
@@ -89,8 +98,13 @@ export interface ListenerEvents {
   symbol: SymbolDetail;
   phrase: { text: string; symbols: AacSymbol[]; words: string[]; event: PhraseSpeakEvent };
   board: { boardId: string; fromBoardId?: string; symbol?: AacSymbol; event: BoardChangeEvent };
-  hello: { source: AacSource & { capabilities: string[]; session: string }; event: HelloEvent };
+  /** `repeat`: a heartbeat for the session already known. `replay`: the relay handed over the current hello because this listener joined late. */
+  hello: { source: AacSource & { capabilities: string[]; session: string }; repeat: boolean; replay: boolean; event: HelloEvent };
   bye: { session: string; event: ByeEvent };
+  /** A sender that advertises "session.heartbeat" went quiet without a bye (closed tab, lost network). */
+  lost: { session: string };
+  /** A transport that can tell (the relay) says whether the AAC app is connected. */
+  presence: { present: boolean; transport: string };
   status: { state: "idle" | TransportState; transport: string; transportState: TransportState; detail?: string };
   gap: { session: string; expected: number; got: number };
   stale: { ageMs: number; event: AacEvent };
@@ -100,7 +114,12 @@ export interface AacListener {
   on<K extends keyof ListenerEvents>(name: K, fn: (detail: ListenerEvents[K], name: string) => void): () => void;
   off<K extends keyof ListenerEvents>(name: K, fn: (detail: ListenerEvents[K], name: string) => void): void;
   inject(raw: unknown): void;
+  /** Channel availability: "open" if ANY transport is open. Not proof that an AAC app is sharing. */
   readonly status: "idle" | TransportState;
+  /** One transport's own state, by name ("relay", "broadcast", "postMessage", "memory"). */
+  statusOf(name: string): TransportState | undefined;
+  /** Whether a transport that can tell says the AAC app is connected. */
+  presenceOf(name: string): boolean | undefined;
   readonly source: (AacSource & { capabilities: string[]; session: string }) | null;
   readonly vocabulary: Vocabulary | null;
   close(): void;
@@ -111,6 +130,8 @@ export declare function createAacListener(opts?: {
   vocabulary?: VocabularyEntry[] | Vocabulary;
   onInvalid?: (reason: string, raw: unknown) => void;
   maxAgeMs?: number;
+  /** Emit "lost" after this long without hearing from a heartbeat sender (default 35000; 0 disables). */
+  quietMs?: number;
 }): AacListener;
 
 export interface AacEmitter {
@@ -118,11 +139,23 @@ export interface AacEmitter {
   disable(): void;
   readonly enabled: boolean;
   setLang(lang: string): void;
+  /** Share only selections matching these words; null shares everything. */
+  limitTo(entries: VocabularyEntry[] | Vocabulary | null): void;
+  readonly limited: boolean;
   symbol(symbol: AacSymbol, opts?: { boardId?: string }): boolean;
   board(boardId: string, opts?: { fromBoardId?: string; symbol?: AacSymbol }): boolean;
   phrase(text: string, symbols?: AacSymbol[]): boolean;
   close(): void;
 }
-export declare function createAacEmitter(opts: { app: AacSource; transports?: Transport[]; transport?: Transport; capabilities?: string[] }): AacEmitter;
+export declare function createAacEmitter(opts: {
+  app: AacSource;
+  transports?: Transport[];
+  transport?: Transport;
+  capabilities?: string[];
+  /** Repeat session.hello while sharing (default 10000 ms; 0 disables). */
+  helloEveryMs?: number;
+  /** Start limited to these words (see limitTo). */
+  limitTo?: VocabularyEntry[] | Vocabulary | null;
+}): AacEmitter;
 
 export declare function mountDevPanel(opts: { listener: AacListener; words?: string[]; parent?: HTMLElement; position?: "top" | "bottom"; label?: string }): () => void;

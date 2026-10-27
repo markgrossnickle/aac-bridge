@@ -1,9 +1,14 @@
 // Transports move protocol objects between an AAC app and a game. They do not
 // validate or interpret messages; the listener and emitter do that.
 //
-// A transport is: { name, start({ message, status }), send?(event), stop() }
+// A transport is: { name, start({ message, status, presence }), send?(event), stop() }
 //   message(data, meta)   called with each received message (object or string)
 //   status(state, detail) "connecting" | "open" | "closed" | "error" | "revoked" | "unauthorized"
+//   presence(present)     optional; a transport that knows whether the AAC app
+//                         is connected (the relay) reports it here
+//
+// A transport being "open" only means the channel works. It does not mean an
+// AAC app is there or sharing: that is presence and session.hello.
 
 export const DEFAULT_CHANNEL = "aac-bridge";
 
@@ -112,7 +117,7 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
   let delay = 500;
   let timer = null;
   let queue = [];
-  let handlers = { message: noop, status: noop };
+  let handlers = { message: noop, status: noop, presence: noop };
 
   const fresh = () => {
     const cutoff = Date.now() - queueTtlMs;
@@ -153,6 +158,20 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
         }
         return;
       }
+      // Relay control messages (protocol "Presence"): whether the paired AAC
+      // app is connected, and its current session.hello for a listener that
+      // joined after sharing started. Never anything the user said.
+      if (text.startsWith('{"relay"')) {
+        let msg = null;
+        try {
+          msg = JSON.parse(text);
+        } catch {
+          return;
+        }
+        if (msg.relay === "presence") handlers.presence(Boolean(msg.sender));
+        else if (msg.relay === "replay" && msg.event) handlers.message(msg.event, { relay: true, replay: true });
+        return;
+      }
       handlers.message(text, { relay: true });
     };
     s.onerror = () => handlers.status("error", "socket error");
@@ -180,7 +199,7 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
   return {
     name: "relay",
     start(h = {}) {
-      handlers = { message: h.message ?? noop, status: h.status ?? noop };
+      handlers = { message: h.message ?? noop, status: h.status ?? noop, presence: h.presence ?? noop };
       if (finished) {
         handlers.status("unauthorized", "pairing ended; pair again");
         return;

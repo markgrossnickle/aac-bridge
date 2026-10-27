@@ -19,8 +19,10 @@ const RECENT_IDS = 500;
  * @param {number} [opts.maxAgeMs] drop selections older than this (default 5000; 0 disables).
  *   Measured against the sender's clock with the session's clock offset removed,
  *   so devices with different clocks still work.
+ * @param {number} [opts.quietMs] for a sender that advertises "session.heartbeat",
+ *   emit "lost" after this long without hearing from it (default 35000; 0 disables).
  */
-export function createAacListener({ transport, transports, vocabulary, onInvalid, maxAgeMs = 5000 } = {}) {
+export function createAacListener({ transport, transports, vocabulary, onInvalid, maxAgeMs = 5000, quietMs = 35_000 } = {}) {
   const list = transports ?? (transport ? [transport] : []);
   const vocab = vocabulary && typeof vocabulary.match === "function" ? vocabulary : vocabulary ? createVocabulary(vocabulary) : null;
   const handlers = new Map();
@@ -29,9 +31,27 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
   const lastSeq = new Map();
   const clockOffset = new Map(); // session -> smallest (arrival - ts) seen
   const ended = new Set(); // sessions that said bye; later messages are ignored
-  const statuses = new Map();
+  const statuses = new Map(); // transport index -> state
+  const presence = new Map(); // transport name -> boolean, for transports that know
   let source = null;
   let closed = false;
+  let quietTimer = null;
+
+  // A sender that advertises "session.heartbeat" repeats session.hello while
+  // sharing. If it goes quiet for `quietMs`, it is gone (closed tab, lost
+  // network) even though it never said bye: emit "lost".
+  const armQuiet = () => {
+    clearTimeout(quietTimer);
+    quietTimer = null;
+    if (!source || !quietMs || !source.capabilities?.includes("session.heartbeat")) return;
+    const session = source.session;
+    quietTimer = setTimeout(() => {
+      if (closed || !source || source.session !== session) return;
+      source = null;
+      emit("lost", { session });
+    }, quietMs);
+    quietTimer.unref?.();
+  };
 
   const emit = (name, detail) => {
     for (const key of [name, "*"]) {
@@ -62,33 +82,48 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
       return;
     }
     const e = res.event;
+    // A replay is the relay handing a late-joining listener the sender's
+    // current session.hello. Only a hello may be replayed, and its old ts and
+    // seq must not skew the stale check or report a gap.
+    const replay = meta.replay === true;
+    if (replay && e.type !== EVENT.HELLO) return;
     if (seen.has(e.id)) return;
     remember(e.id);
     if (ended.has(e.session)) return;
 
-    // Stale check: a command that arrives seconds late (queued behind a bad
-    // connection) would act on a game state the player no longer sees.
-    const arrival = Date.now();
-    const offset = Math.min(clockOffset.get(e.session) ?? Infinity, arrival - e.ts);
-    clockOffset.set(e.session, offset);
-    const age = arrival - e.ts - offset;
-    if (maxAgeMs > 0 && age > maxAgeMs && (e.type === EVENT.SYMBOL || e.type === EVENT.PHRASE || e.type === EVENT.BOARD)) {
-      emit("stale", { ageMs: age, event: e });
-      return;
+    if (!replay) {
+      // Stale check: a command that arrives seconds late (queued behind a bad
+      // connection) would act on a game state the player no longer sees.
+      const arrival = Date.now();
+      const offset = Math.min(clockOffset.get(e.session) ?? Infinity, arrival - e.ts);
+      clockOffset.set(e.session, offset);
+      const age = arrival - e.ts - offset;
+      if (maxAgeMs > 0 && age > maxAgeMs && (e.type === EVENT.SYMBOL || e.type === EVENT.PHRASE || e.type === EVENT.BOARD)) {
+        emit("stale", { ageMs: age, event: e });
+        return;
+      }
+
+      const prev = lastSeq.get(e.session);
+      if (prev !== undefined && e.seq > prev + 1) emit("gap", { session: e.session, expected: prev + 1, got: e.seq });
+      if (prev === undefined || e.seq > prev) lastSeq.set(e.session, e.seq);
     }
 
-    const prev = lastSeq.get(e.session);
-    if (prev !== undefined && e.seq > prev + 1) emit("gap", { session: e.session, expected: prev + 1, got: e.seq });
-    if (prev === undefined || e.seq > prev) lastSeq.set(e.session, e.seq);
+    if (source && source.session === e.session) armQuiet();
 
     switch (e.type) {
-      case EVENT.HELLO:
+      case EVENT.HELLO: {
+        const repeat = Boolean(source && source.session === e.session);
         source = { ...e.source, capabilities: e.capabilities, session: e.session };
-        emit("hello", { source, event: e });
+        armQuiet();
+        emit("hello", { source, repeat, replay, event: e });
         break;
+      }
       case EVENT.BYE:
         ended.add(e.session);
-        if (source && source.session === e.session) source = null;
+        if (source && source.session === e.session) {
+          source = null;
+          armQuiet();
+        }
         emit("bye", { session: e.session, event: e });
         break;
       case EVENT.SYMBOL: {
@@ -123,13 +158,21 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
       message: receive,
       status: (state, detail) => {
         statuses.set(i, state);
+        if (state !== "open") presence.delete(t.name);
         emit("status", { state: overall(), transport: t.name, transportState: state, detail });
+      },
+      presence: (present) => {
+        presence.set(t.name, present);
+        emit("presence", { present, transport: t.name });
       },
     });
   });
 
   return {
-    /** Subscribe: "word", "symbol", "phrase", "board", "hello", "bye", "status", "gap", "stale", or "*". Returns an unsubscribe function. */
+    /**
+     * Subscribe: "word", "symbol", "phrase", "board", "hello", "bye", "lost",
+     * "presence", "status", "gap", "stale", or "*". Returns an unsubscribe function.
+     */
     on(name, fn) {
       if (!handlers.has(name)) handlers.set(name, new Set());
       handlers.get(name).add(fn);
@@ -142,9 +185,23 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
     inject(raw) {
       receive(raw, { injected: true });
     },
-    /** "idle" | "connecting" | "open" | "error" | "closed" across all transports. */
+    /**
+     * Channel availability across all transports: "open" if any transport is
+     * open. It does NOT mean an AAC app is connected or sharing; use
+     * statusOf(name) for one transport's lifecycle (a revoked relay), and
+     * "hello" / "presence" / "bye" / "lost" for whether someone is sharing.
+     */
     get status() {
       return overall();
+    },
+    /** One transport's state by name ("relay", "broadcast", ...), or undefined. */
+    statusOf(name) {
+      const i = list.findIndex((t) => t.name === name);
+      return i < 0 ? undefined : statuses.get(i);
+    },
+    /** Whether a transport that can tell (the relay) says the AAC app is connected: true, false, or undefined. */
+    presenceOf(name) {
+      return presence.get(name);
     },
     /** What the AAC app said about itself in session.hello, or null. */
     get source() {
@@ -155,6 +212,7 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
     },
     close() {
       closed = true;
+      clearTimeout(quietTimer);
       for (const t of list) t.stop();
       handlers.clear();
     },

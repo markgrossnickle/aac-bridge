@@ -33,12 +33,39 @@ async function call(fetchImpl, url, init) {
   return body;
 }
 
-/** Game side: ask the relay for a pairing. Returns { code, listenerToken, codeExpiresAt, expiresAt }. */
-export function createPairing({ relay, fetchImpl } = {}) {
-  return call(fetchImpl, `${base(relay)}/pairings`, { method: "POST" });
+/** Flatten vocabulary entries (strings or { word, synonyms }) into a short list of plain words. */
+export function vocabularyWords(entries) {
+  if (!entries) return undefined;
+  const list = Array.isArray(entries) ? entries : entries.words;
+  const out = new Set();
+  for (const e of list ?? []) {
+    const forms = typeof e === "string" ? [e] : e && typeof e.word === "string" ? [e.word, ...(e.synonyms ?? [])] : [];
+    for (const f of forms) if (typeof f === "string" && f.trim() && f.length <= PAIRING_WORD_MAX) out.add(f.trim());
+  }
+  return [...out].slice(0, PAIRING_WORDS_MAX);
+}
+export const PAIRING_WORDS_MAX = 300;
+export const PAIRING_WORD_MAX = 64;
+
+/**
+ * Game side: ask the relay for a pairing. Returns { code, listenerToken, codeExpiresAt, expiresAt }.
+ * Pass `vocabulary` (the words the game understands) so the AAC app can offer
+ * "share only the game's words"; it is handed to the AAC app when it claims.
+ */
+export function createPairing({ relay, vocabulary, fetchImpl } = {}) {
+  const words = vocabularyWords(vocabulary);
+  return call(fetchImpl, `${base(relay)}/pairings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(words && words.length ? { vocabulary: words } : {}),
+  });
 }
 
-/** AAC app side: claim the code the user entered. Returns { senderToken, expiresAt }. */
+/**
+ * AAC app side: claim the code the user entered. Returns { senderToken, expiresAt, vocabulary? }.
+ * `vocabulary` is the game's word list, when the game sent one: pass it to
+ * the emitter's `limitTo()` if the user chose to share only those words.
+ */
 export function claimPairing({ relay, code, fetchImpl } = {}) {
   const clean = String(code ?? "").replace(/\D/g, "");
   if (clean.length !== 6) return Promise.reject(new Error("pairing: the code has 6 digits"));
