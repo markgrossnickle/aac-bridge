@@ -10,6 +10,9 @@
   for sending (for example speech queued while the relay was connecting), so
   the new scope covers everything that has not left the device. Transports
   may implement `clear()`; the relay transport does.
+- Listener: a replayed `session.hello` is delivered even if its id was seen
+  before, so a game whose own relay link drops and reconnects learns at once
+  that sharing is still on.
 
 ## 0.3.0
 

@@ -498,3 +498,34 @@ test("narrowing to the game's words discards speech queued before the relay conn
     await relay.close();
   }
 });
+
+test("a listener whose own link drops learns again that sharing is on when it reconnects", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const mine = [];
+    class Tracked extends WebSocket {
+      constructor(...args) {
+        super(...args);
+        mine.push(this);
+      }
+    }
+    const game = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: Tracked }) });
+    const hellos = [];
+    game.on("hello", (d) => hellos.push(d.replay));
+    await wait(150);
+    // No heartbeat, so the only hello there is to replay is one already seen.
+    const out = createAacEmitter({ app: { app: "cboard" }, helloEveryMs: 0, transport: relayTransport({ relay: http, token: senderToken, WebSocketImpl: WebSocket }) });
+    out.enable();
+    await wait(200);
+    assert.deepEqual(hellos, [false]);
+    mine.at(-1).close(); // the game's link drops; the AAC app keeps sharing
+    await wait(1200); // reconnect after 500 ms
+    assert.deepEqual(hellos, [false, true], "the replayed hello is delivered although its id was seen");
+    out.close();
+    game.close();
+  } finally {
+    await relay.close();
+  }
+});

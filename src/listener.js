@@ -87,8 +87,12 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
     // seq must not skew the stale check or report a gap.
     const replay = meta.replay === true;
     if (replay && e.type !== EVENT.HELLO) return;
-    if (seen.has(e.id)) return;
-    remember(e.id);
+    // A replay is exempt from duplicate dropping: after this listener's relay
+    // link drops and comes back, the relay replays a hello it already saw, and
+    // that is exactly how it learns sharing is still on. A hello acts on no
+    // game state, so seeing it twice is harmless.
+    if (seen.has(e.id) && !replay) return;
+    if (!seen.has(e.id)) remember(e.id);
     if (ended.has(e.session)) return;
 
     if (!replay) {
