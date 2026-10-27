@@ -11,12 +11,17 @@
       "default": "./src/index.js"
     },
     "./protocol": "./src/protocol.js",
-    "./vocabulary": "./src/vocabulary.js"
+    "./vocabulary": "./src/vocabulary.js",
+    "./relay": "./relay/server.js"
   },
   "files": [
     "src",
+    "relay/server.js",
+    "relay/package.json",
+    "examples",
     "PROTOCOL.md",
     "PRIVACY.md",
+    "CHANGELOG.md",
     "docs"
   ],
   "sideEffects": false,
