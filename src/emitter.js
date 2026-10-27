@@ -110,9 +110,14 @@ export function createAacEmitter({ app, transports, transport, capabilities = DE
      * synonyms }, or a createVocabulary() result); null shares everything.
      * While limited: unmatched symbols are not sent, board changes are not
      * sent, and a phrase is sent as only its matching symbols.
+     *
+     * Turning a limit on (or changing it) also discards anything still waiting
+     * to be sent, such as speech queued while the relay was connecting, so
+     * the new scope covers everything that has not left the device.
      */
     limitTo(entries) {
       setLimit(entries);
+      if (limit) for (const t of list) t.clear?.();
       if (enabled) send(EVENT.HELLO, { capabilities: caps() });
     },
     /** Whether sharing is limited to a word list. */

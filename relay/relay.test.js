@@ -446,3 +446,86 @@ test("local play: --serve hands out the game site and the example AAC app, nothi
     await plain.relay.close();
   }
 });
+
+test("local play: encoded backslashes and dot segments cannot reach outside examples/ and src/", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aac-serve-"));
+  writeFileSync(join(dir, "index.html"), "<h1>hub</h1>");
+  const { relay, http } = await start({ serveDir: dir });
+  try {
+    const status = async (path) => (await fetch(`${http}${path}`)).status;
+    assert.equal(await status("/aac-bridge/examples/aac-app.html"), 200);
+    assert.equal(await status("/aac-bridge/src/index.js"), 200);
+    for (const bad of [
+      "/aac-bridge/src/%5c..%5c.git%5cconfig",
+      "/aac-bridge/src/%5c..%5crelay%5cserver.js",
+      "/aac-bridge/src/%5c..%5cpackage.json",
+      "/aac-bridge/src/%2e%2e/relay/server.js",
+      "/aac-bridge/src/%2e%2e%2fpackage.json",
+      "/aac-bridge/examples/%5c..%5c..%5cpackage.json",
+      "/aac-bridge/package.json",
+      "/aac-bridge/relay/server.js",
+      "/aac-bridge/.git/config",
+      "/%5c..%5cpackage.json",
+      "/index.html%5c..%5c..%5cpackage.json",
+    ]) {
+      assert.equal(await status(bad), 404, bad);
+    }
+  } finally {
+    await relay.close();
+  }
+});
+
+test("narrowing to the game's words discards speech queued before the relay connected", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const game = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }) });
+    const got = [];
+    game.on("symbol", (d) => got.push(d.symbol.text));
+    await wait(150);
+    const out = createAacEmitter({ app: { app: "t" }, transport: relayTransport({ relay: http, token: senderToken, WebSocketImpl: slowSocket(300) }) });
+    out.enable();
+    out.symbol({ text: "something unrelated and private" });
+    out.limitTo(["go"]);
+    out.symbol({ text: "go" });
+    await wait(800);
+    assert.deepEqual(got, ["go"]);
+    assert.ok(game.source.capabilities.includes("sharing.limited"));
+    out.close();
+    game.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("a listener whose own link drops learns again that sharing is on when it reconnects", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const mine = [];
+    class Tracked extends WebSocket {
+      constructor(...args) {
+        super(...args);
+        mine.push(this);
+      }
+    }
+    const game = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: Tracked }) });
+    const hellos = [];
+    game.on("hello", (d) => hellos.push(d.replay));
+    await wait(150);
+    // No heartbeat, so the only hello there is to replay is one already seen.
+    const out = createAacEmitter({ app: { app: "cboard" }, helloEveryMs: 0, transport: relayTransport({ relay: http, token: senderToken, WebSocketImpl: WebSocket }) });
+    out.enable();
+    await wait(200);
+    assert.deepEqual(hellos, [false]);
+    mine.at(-1).close(); // the game's link drops; the AAC app keeps sharing
+    await wait(1200); // reconnect after 500 ms
+    assert.deepEqual(hellos, [false, true], "the replayed hello is delivered although its id was seen");
+    out.close();
+    game.close();
+  } finally {
+    await relay.close();
+  }
+});

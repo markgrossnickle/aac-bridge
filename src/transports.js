@@ -213,6 +213,10 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
       if (socket && authed && socket.readyState === 1) socket.send(msg);
       else if (fresh().length < maxQueue) queue.push({ msg, at: Date.now() });
     },
+    /** Drop everything waiting to be sent (the sharing scope narrowed). */
+    clear() {
+      queue = [];
+    },
     stop() {
       stopped = true;
       clearTimeout(timer);
