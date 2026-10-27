@@ -9,7 +9,7 @@ import { createAacEmitter, relayTransport, claimPairing, revokePairing } from "a
 
 // In settings: the user types (or scans) the 6-digit code the game shows.
 const RELAY = "https://relay.example.org";
-const { senderToken } = await claimPairing({ relay: RELAY, code: enteredCode });
+const { senderToken, vocabulary } = await claimPairing({ relay: RELAY, code: enteredCode });
 secureStore.set("aacBridgeToken", senderToken); // a secret: never in a URL or log
 
 const share = createAacEmitter({
@@ -19,6 +19,8 @@ const share = createAacEmitter({
 // "Forget this game": await revokePairing({ relay: RELAY, token: senderToken });
 
 settings.onShareChange((on) => (on ? share.enable() : share.disable()));
+// "Share only the game's words", on by default when the game sent a list:
+settings.onLimitChange((on) => share.limitTo(on && vocabulary ? vocabulary : null));
 i18n.onChange((lang) => share.setLang(lang));
 
 // Where a tile is selected:
@@ -39,6 +41,28 @@ Rules that matter (from `PROTOCOL.md` and `PRIVACY.md`):
 - `image` must be an absolute `https://` URL; the game is on another origin.
 - Sharing starts only from a user action and is visibly on while active.
 - For an embedded game, use `postMessageTransport({ target: iframe, origin: "https://exact.game.origin" })`.
+- Offer **limited sharing** when the game sent its word list: unmatched
+  symbols and board changes are then never sent, and phrases carry only the
+  matching words.
+- Keep the default heartbeat (`helloEveryMs`, 10 s): it is how a game that
+  opens after sharing started, or a game in another tab, learns sharing is on.
+
+## Connecting without the internet
+
+The relay can run on a computer in the room (`docs/local-play.md`). For your
+app that is just another relay URL, an `http://` address on the local
+network. Two things to check in your runtime:
+
+- **Mixed content.** A page served over `https` cannot call a plain `http`
+  local address, and Chrome asks for local network access permission. A
+  native build (Cordova, Capacitor, a WebView) can usually allow it for local
+  addresses; a website cannot without a relay certificate the device trusts.
+- **Finding the relay.** Typing the address works for a first test. A native
+  app can browse the local network for the relay (DNS-SD) instead, with the
+  pairing code still required.
+
+Bluetooth LE and WebRTC are planned transports (`PROTOCOL.md`). Either way
+the events, pairing code, sharing switch and revocation stay the same.
 
 ## Cboard specifically
 
@@ -88,11 +112,13 @@ What that needs from Cboard:
    dispatched, as the output bar already does in `translateOutput`.
 3. **A Settings entry**, next to the existing navigation settings: "Share
    what I say with a game", a field (or QR scan) for the game's 6-digit code
-   that calls `claimPairing`, an on/off switch, a "forget" button that calls
-   `revokePairing`, and an indicator in the board header while sharing.
+   that calls `claimPairing`, an on/off switch, "Only the game's words" (on
+   by default), a "forget" button that calls `revokePairing`, and an
+   indicator in the board header while sharing.
 4. **Native builds.** In the Cordova Android app, the WebSocket relay works
-   unchanged. A local Android broadcast intent carrying the same JSON is a
-   later option for offline, same-device play.
+   unchanged, including a relay on the local network once the app allows
+   cleartext to local addresses. A local Android broadcast intent carrying the
+   same JSON is a later option for same-device play.
 
 The prototype's `?game=` URL switch and `"*"` default target were fine for a
 demo but should not ship: see `PRIVACY.md`.

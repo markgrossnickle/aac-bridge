@@ -30,17 +30,17 @@
     // Default: another tab of this site (examples/aac-app.html) over BroadcastChannel.
     // ?relay=http://localhost:8787 : pair through a relay instead. The game shows a
     // one-time code; type it into the AAC app.
+    const WORDS = ["yes", "no", "eat", "drink", "more", "help", "play", "stop", "go", "like"];
     const q = new URLSearchParams(location.search);
     let transport;
     if (q.get("relay")) {
-      const pairing = await createPairing({ relay: q.get("relay") });
+      const pairing = await createPairing({ relay: q.get("relay"), vocabulary: WORDS });
       document.getElementById("status").textContent = `pairing code: ${pairing.code}`;
       transport = relayTransport({ relay: q.get("relay"), token: pairing.listenerToken });
     } else {
       transport = broadcastTransport();
     }
 
-    const WORDS = ["yes", "no", "eat", "drink", "more", "help", "play", "stop", "go", "like"];
     const aac = createAacListener({ transport, vocabulary: WORDS });
     mountDevPanel({ listener: aac });
 
@@ -55,6 +55,8 @@
 
     aac.on("hello", ({ source }) => ($("status").textContent = `connected: ${source.app}`));
     aac.on("bye", () => ($("status").textContent = "AAC app stopped sharing"));
+    aac.on("lost", () => ($("status").textContent = "AAC app went away"));
+    aac.on("presence", ({ present }) => present || ($("status").textContent = "AAC app disconnected"));
     aac.on("symbol", ({ symbol, word }) => {
       const hit = word === target;
       $("last").textContent = symbol.text;

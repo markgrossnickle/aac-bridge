@@ -1,6 +1,6 @@
 {
   "name": "aac-bridge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Let any web game listen to what a person selects on an AAC board. A small open protocol, a game-side listener, an AAC-app-side sender, and a relay.",
   "type": "module",
   "main": "./src/index.js",
@@ -21,7 +21,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "test": "node --test test/protocol.test.js test/vocabulary.test.js test/listener-emitter.test.js",
+    "test": "node --test test/protocol.test.js test/vocabulary.test.js test/listener-emitter.test.js test/presence.test.js",
     "test:relay": "cd relay && npm test",
     "examples": "npx --yes http-server@14.1.1 . -p 5180 -c-1"
   },

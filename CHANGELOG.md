@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0
+
+- Relay: a client sending an oversized or malformed frame is disconnected
+  instead of crashing the relay for everyone.
+- Presence: the relay tells listeners whether the AAC app is connected and
+  replays the current `session.hello` to a listener that joins while sharing
+  is on (a game opened from a hub). Senders repeat their hello every 10 s
+  (`helloEveryMs`, capability `session.heartbeat`), and listeners emit
+  `lost` when a heartbeat sender goes quiet. New listener events
+  `presence` and `lost`; `hello` carries `repeat` and `replay`.
+- Listener: `statusOf(name)` and `presenceOf(name)` report one transport,
+  so an always-open BroadcastChannel no longer hides a revoked relay.
+- Limited sharing: `createPairing({ vocabulary })` sends the game's words,
+  `claimPairing()` returns them, and the emitter's `limitTo()` shares only
+  matching selections (capability `sharing.limited`).
+- Local play: `node relay/server.js --serve <dir>` also serves a built game
+  site and the example AAC app, for play on one Wi-Fi network with no
+  internet. The example AAC app pairs with a code field, offers limited
+  sharing and "Forget this game".
+- Docs: presence, limited sharing, local play, planned transports (local
+  relay in a native app, WebRTC, Bluetooth LE, controller adapters).
+
 ## 0.2.0
 
 - Relay requires pairing: a one-time 6-digit code, a secret token per side,

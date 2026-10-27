@@ -5,82 +5,167 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>aac-bridge example AAC app</title>
   <style>
-    body { margin: 0; font-family: system-ui, sans-serif; background: #f5f3ee; color: #222; }
-    header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #fff; border-bottom: 1px solid #ddd; }
-    #bar { flex: 1; min-height: 44px; display: flex; gap: 6px; align-items: center; padding: 0 8px; border: 1px solid #ccc; border-radius: 8px; }
-    #sharing { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: #eee; }
-    #sharing.on { background: #4fd1a5; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 12px; padding: 16px; }
-    .tile { aspect-ratio: 1; border: 0; border-radius: 14px; background: #fff176; font-size: 22px; font-weight: 700; cursor: pointer; }
-    button.small { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+    :root { --bg: #f5f3ee; --card: #fff; --ink: #222; --muted: #666; --on: #4fd1a5; --tile: #fff176; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+    header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 16px; background: var(--card); border-bottom: 1px solid #ddd; }
+    #status { font-size: 14px; padding: 6px 12px; border-radius: 999px; background: #eee; }
+    #status.on { background: var(--on); font-weight: 700; }
+    #pair { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    #pair[hidden] { display: none; }
+    #pair input[type="text"] { width: 8.5em; font-size: 20px; letter-spacing: 0.15em; padding: 8px 10px; border: 1px solid #bbb; border-radius: 8px; }
+    label { display: inline-flex; gap: 6px; align-items: center; font-size: 15px; min-height: 44px; }
+    label[hidden] { display: none; }
+    input[type="checkbox"] { width: 24px; height: 24px; }
+    button.small { min-height: 44px; padding: 8px 14px; border-radius: 8px; border: 1px solid #bbb; background: #fff; font-size: 15px; cursor: pointer; }
+    #bar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; min-height: 52px; }
+    #message { flex: 1; min-height: 44px; display: flex; align-items: center; padding: 0 10px; border: 1px solid #ccc; border-radius: 8px; background: #fff; font-size: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; padding: 8px 16px 24px; }
+    .tile { aspect-ratio: 1; border: 0; border-radius: 14px; background: var(--tile); font-size: clamp(16px, 4.5vw, 22px); font-weight: 700; cursor: pointer; }
+    .tile.dim { opacity: 0.4; }
+    .tile.red { background: #ff8a80; } .tile.blue { background: #82b1ff; } .tile.green { background: #b9f6ca; } .tile.yellow { background: #ffe57f; }
+    .hint { color: var(--muted); font-size: 13px; padding: 0 16px; }
   </style>
 </head>
 <body>
   <header>
-    <label><input type="checkbox" id="share" /> Share what I say with a game</label>
-    <span id="sharing">not sharing</span>
-    <div id="bar"></div>
+    <div id="pair">
+      <input id="code" type="text" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="Code" aria-label="6-digit code from the game" />
+      <button class="small" id="connect">Connect</button>
+    </div>
+    <label><input type="checkbox" id="share" disabled /> Share what I say with the game</label>
+    <label id="limitRow" hidden><input type="checkbox" id="limit" checked /> Only the game's words</label>
+    <button class="small" id="forget" hidden>Forget this game</button>
+    <span id="status">not connected</span>
+  </header>
+  <div id="bar">
+    <div id="message"></div>
     <button class="small" id="speak">Speak</button>
     <button class="small" id="clear">Clear</button>
-  </header>
+  </div>
   <div class="grid" id="grid"></div>
+  <p class="hint" id="hint"></p>
   <script type="module">
-    import { createAacEmitter, broadcastTransport, relayTransport, claimPairing } from "../src/index.js";
+    import { createAacEmitter, broadcastTransport, relayTransport, claimPairing, revokePairing } from "../src/index.js";
 
-    // Same transport switch as examples/game.html. With ?relay=..., ticking the
-    // box asks for the code the game shows, then pairs.
+    // Where to pair. Served by an aac-bridge relay (local play, `--serve`),
+    // the relay is this page's own origin. `?relay=` points elsewhere in
+    // development. With no relay at all, it talks to games in other tabs of
+    // this same site (BroadcastChannel).
     const q = new URLSearchParams(location.search);
+    async function findRelay() {
+      if (q.get("relay")) return q.get("relay");
+      try {
+        const r = await fetch("/healthz", { cache: "no-store" });
+        const body = await r.json();
+        if (body && body.relay === "aac-bridge") return location.origin;
+      } catch {}
+      return null;
+    }
+    const relay = await findRelay();
+    const STORE = "aac-bridge-example-pairing";
+    const $ = (id) => document.getElementById(id);
+    const status = $("status");
     let share = null;
-    async function makeEmitter() {
-      let transport = broadcastTransport();
-      if (q.get("relay")) {
-        const code = prompt("Enter the 6-digit code shown by the game");
-        const { senderToken } = await claimPairing({ relay: q.get("relay"), code });
-        transport = relayTransport({ relay: q.get("relay"), token: senderToken });
-      }
-      return createAacEmitter({ app: { app: "example-aac", version: "0.2.0", lang: "en" }, transport });
+    let gameWords = null;
+
+    const read = () => { try { return JSON.parse(localStorage.getItem(STORE) || "null"); } catch { return null; } };
+    const write = (v) => { try { v ? localStorage.setItem(STORE, JSON.stringify(v)) : localStorage.removeItem(STORE); } catch {} };
+
+    function setStatus(text, on = false) {
+      status.textContent = text;
+      status.classList.toggle("on", on);
+    }
+    function sharingText() {
+      return share?.limited ? "sharing the game's words" : "sharing everything";
     }
 
-    // Consent: nothing is sent until the user ticks the box.
-    const box = document.getElementById("share");
-    const badge = document.getElementById("sharing");
-    box.addEventListener("change", async () => {
-      if (box.checked && !share) {
-        try {
-          share = await makeEmitter();
-        } catch (err) {
-          box.checked = false;
-          badge.textContent = `pairing failed: ${err.message}`;
-          return;
-        }
+    function ready(transport, words) {
+      share?.disable();
+      gameWords = words && words.length ? words.map((w) => w.toLowerCase()) : null;
+      share = createAacEmitter({ app: { app: "example-aac", version: "0.3.0", lang: "en" }, transport });
+      $("share").disabled = false;
+      $("share").checked = false;
+      $("limitRow").hidden = !gameWords;
+      $("forget").hidden = !relay;
+      $("pair").hidden = true;
+      applyLimit();
+      setStatus("connected, not sharing");
+    }
+    function applyLimit() {
+      share?.limitTo(gameWords && $("limit").checked ? gameWords : null);
+      for (const b of document.querySelectorAll(".tile")) {
+        b.classList.toggle("dim", Boolean(share?.limited && !gameWords.includes(b.dataset.word)));
       }
-      box.checked ? share.enable() : share.disable();
-      badge.textContent = box.checked ? "sharing with game" : "not sharing";
-      badge.classList.toggle("on", box.checked);
+    }
+
+    if (!relay) {
+      $("hint").textContent = "No relay: sharing with games open in other tabs of this site.";
+      ready(broadcastTransport(), null);
+    } else {
+      $("hint").textContent = `Relay: ${relay}. Type the code the game shows, then turn sharing on.`;
+      const saved = read();
+      if (saved && saved.relay === relay) ready(relayTransport({ relay, token: saved.senderToken }), saved.vocabulary);
+    }
+
+    $("connect").addEventListener("click", async () => {
+      try {
+        const claim = await claimPairing({ relay, code: $("code").value });
+        write({ relay, senderToken: claim.senderToken, vocabulary: claim.vocabulary ?? null });
+        ready(relayTransport({ relay, token: claim.senderToken }), claim.vocabulary);
+      } catch (err) {
+        setStatus(`pairing failed: ${err.message}`);
+      }
+    });
+    $("code").addEventListener("keydown", (e) => { if (e.key === "Enter") $("connect").click(); });
+
+    // Consent: nothing is sent until the user turns sharing on.
+    $("share").addEventListener("change", () => {
+      if (!share) return;
+      $("share").checked ? share.enable() : share.disable();
+      setStatus($("share").checked ? sharingText() : "connected, not sharing", $("share").checked);
+    });
+    $("limit").addEventListener("change", () => {
+      applyLimit();
+      if (share?.enabled) setStatus(sharingText(), true);
+    });
+    $("forget").addEventListener("click", async () => {
+      const saved = read();
+      share?.disable();
+      share = null;
+      $("share").checked = false;
+      $("share").disabled = true;
+      if (saved) await revokePairing({ relay, token: saved.senderToken }).catch(() => {});
+      write(null);
+      $("pair").hidden = false;
+      $("forget").hidden = true;
+      $("limitRow").hidden = true;
+      for (const b of document.querySelectorAll(".tile")) b.classList.remove("dim");
+      setStatus("not connected");
     });
 
-    const WORDS = ["yes", "no", "eat", "drink", "more", "help", "play", "stop", "go", "like", "happy", "sad"];
-    const bar = document.getElementById("bar");
+    const WORDS = ["go", "stop", "more", "again", "pop", "big", "red", "blue", "green", "yellow", "yes", "no", "help", "play", "eat", "sad"];
     let message = [];
     for (const w of WORDS) {
       const b = document.createElement("button");
-      b.className = "tile";
+      b.className = `tile ${w}`;
       b.textContent = w;
+      b.dataset.word = w;
       b.addEventListener("click", () => {
         const symbol = { text: w, key: `example.${w}`, id: `t-${w}` };
         message.push(symbol);
-        bar.textContent = message.map((s) => s.text).join(" ");
+        $("message").textContent = message.map((s) => s.text).join(" ");
         share?.symbol(symbol, { boardId: "home" });
       });
-      document.getElementById("grid").appendChild(b);
+      $("grid").appendChild(b);
     }
-    document.getElementById("speak").addEventListener("click", () => {
+    $("speak").addEventListener("click", () => {
       if (!message.length) return;
       share?.phrase(message.map((s) => s.text).join(" "), message);
     });
-    document.getElementById("clear").addEventListener("click", () => {
+    $("clear").addEventListener("click", () => {
       message = [];
-      bar.textContent = "";
+      $("message").textContent = "";
     });
   </script>
 </body>

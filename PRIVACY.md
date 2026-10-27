@@ -21,11 +21,17 @@ suggestions.
    reconnecting before it returns. Do not keep a copy to send later.
 6. **Send the minimum.** Symbol text, optional key and image, the board id. No
    user ids, no names, no history.
+7. **Offer limited sharing.** When the game supplied its word list, offer
+   "share only the game's words" (`limitTo()`), on by default. Unrelated
+   speech then never leaves the device.
+8. **Nearby is not consent.** Local Wi-Fi or Bluetooth play needs the same
+   pairing code, visible sharing state and revocation as the internet.
 
 ## For games and listeners
 
 1. **Use what you get, keep nothing.** Do not log, store or forward AAC
-   messages beyond what the game needs right now. No analytics on them.
+   messages beyond what the game needs right now. No analytics on them, and
+   no in-memory history of words outside test code: act on a word, then drop it.
 2. **Check the origin.** Listen with an origin allow list (the library refuses
    `"*"`), and validate every message (the library does).
 3. **Never require AAC to play.** Offer touch as well; AAC input is an
@@ -36,7 +42,11 @@ suggestions.
 The reference relay (`relay/server.js`) only connects paired devices (one-time
 code, separate secret tokens per side, revocable, expiring), forwards in one
 direction only, limits message size, rate and claim attempts, keeps
-everything in memory, and logs nothing but counts. If you run one, keep it that way, serve it
+everything in memory, and logs nothing but counts. It keeps one message per
+pairing: the sender's latest `session.hello` (app name, version, language,
+capabilities), only while the sender is connected, so a game that joins late
+knows sharing is on. A game's word list is kept with its pairing. Run locally
+(`--serve`), nothing leaves the room. If you run one, keep it that way, serve it
 over TLS, and set `ALLOWED_ORIGINS`.
 
 ## Reporting a problem

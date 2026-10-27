@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRelay } from "./server.js";
 import {
   claimPairing,
   createAacEmitter,
   createAacListener,
   createPairing,
+  memoryLink,
   relayTransport,
   revokePairing,
 } from "../src/index.js";
@@ -24,16 +28,17 @@ async function start(opts = {}) {
 function rawAuth(ws, token, { authenticate = true } = {}) {
   return new Promise((resolve) => {
     const socket = new WebSocket(ws);
-    const out = { socket, reply: null, closeCode: null, messages: [] };
+    const out = { socket, reply: null, closeCode: null, messages: [], control: [] };
     socket.on("open", () => {
       if (authenticate) socket.send(JSON.stringify({ relay: "auth", token }));
     });
     socket.on("message", (m) => {
       const msg = JSON.parse(String(m));
-      if (msg.relay) {
+      if (msg.relay === "ok") {
         out.reply = msg;
         resolve(out);
-      } else out.messages.push(msg);
+      } else if (msg.relay) out.control.push(msg);
+      else out.messages.push(msg);
     });
     socket.on("close", (code) => {
       out.closeCode = code;
@@ -254,5 +259,190 @@ test("the sender is rate limited", async () => {
     sender.socket.close();
   } finally {
     await relay.close();
+  }
+});
+
+test("an oversized or malformed frame closes only that client; the relay keeps serving", async () => {
+  const { relay, http, ws } = await start({ maxMessageBytes: 16 * 1024 });
+  try {
+    const big = new WebSocket(ws);
+    const bigClosed = new Promise((r) => big.on("close", r));
+    big.on("error", () => {});
+    big.on("open", () => big.send("x".repeat(17_000)));
+    await bigClosed;
+
+    const bad = new WebSocket(ws);
+    const badClosed = new Promise((r) => bad.on("close", r));
+    bad.on("error", () => {});
+    bad.on("open", () => bad._socket.write(Buffer.from([0x8f, 0x80, 0, 0, 0, 0]))); // reserved opcode
+    await badClosed;
+
+    // Still alive: a new pairing streams end to end.
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const game = await rawAuth(ws, p.listenerToken);
+    const sender = await rawAuth(ws, senderToken);
+    sender.socket.send(JSON.stringify(envelope("still here")));
+    await wait(150);
+    assert.deepEqual(game.messages.map((m) => m.symbol.text), ["still here"]);
+    game.socket.close();
+    sender.socket.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("a game that opens while sharing is on learns it at once (presence + replayed hello), with no false gap", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const hub = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }) });
+    const hubHellos = [];
+    hub.on("hello", (d) => hubHellos.push(d));
+    await wait(150);
+    const out = createAacEmitter({ app: { app: "cboard" }, transport: relayTransport({ relay: http, token: senderToken, WebSocketImpl: WebSocket }) });
+    out.enable();
+    await wait(200);
+    for (const w of ["a", "b", "c"]) out.symbol({ text: w });
+    await wait(150);
+    assert.equal(hubHellos.length, 1);
+    hub.close(); // the hub page navigates into a game
+
+    const game = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }), vocabulary: ["go"] });
+    const seen = { hello: [], presence: [], gap: 0, words: [] };
+    game.on("hello", (d) => seen.hello.push(d));
+    game.on("presence", (d) => seen.presence.push(d.present));
+    game.on("gap", () => seen.gap++);
+    game.on("word", (d) => seen.words.push(d.word));
+    await wait(250);
+    assert.equal(seen.hello.length, 1, "replayed hello");
+    assert.equal(seen.hello[0].replay, true);
+    assert.equal(seen.hello[0].source.app, "cboard");
+    assert.equal(game.source.app, "cboard");
+    assert.deepEqual(seen.presence, [true]);
+    assert.equal(game.presenceOf("relay"), true);
+    out.symbol({ text: "go" });
+    await wait(150);
+    assert.deepEqual(seen.words, ["go"]);
+    assert.equal(seen.gap, 0);
+
+    // The sender's connection goes away: presence turns false.
+    out.close();
+    await wait(200);
+    assert.equal(game.presenceOf("relay"), false);
+    game.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("no replay before sharing starts or after it stops", async () => {
+  const { relay, http, ws } = await start();
+  try {
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const before = await rawAuth(ws, p.listenerToken);
+    await wait(100);
+    assert.deepEqual(before.control, [{ relay: "presence", sender: false }]);
+    const out = createAacEmitter({ app: { app: "cboard" }, transport: relayTransport({ relay: http, token: senderToken, WebSocketImpl: WebSocket }) });
+    out.enable();
+    await wait(200);
+    out.disable();
+    await wait(200);
+    const after = await rawAuth(ws, p.listenerToken);
+    await wait(100);
+    assert.deepEqual(after.control, [{ relay: "presence", sender: false }]);
+    before.socket.close();
+    after.socket.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("the game word list travels with the pairing, and only those words are shared when the AAC app limits to it", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http, vocabulary: ["go", { word: "pop", synonyms: ["burst"] }] });
+    const claim = await claimPairing({ relay: http, code: p.code });
+    assert.deepEqual(claim.vocabulary, ["go", "pop", "burst"]);
+    const game = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }) });
+    const got = [];
+    game.on("symbol", (d) => got.push(d.symbol.text));
+    game.on("phrase", (d) => got.push(`phrase:${d.text}`));
+    game.on("board", () => got.push("board"));
+    await wait(150);
+    const out = createAacEmitter({ app: { app: "cboard" }, transport: relayTransport({ relay: http, token: claim.senderToken, WebSocketImpl: WebSocket }), limitTo: claim.vocabulary });
+    out.enable();
+    await wait(200);
+    assert.equal(out.symbol({ text: "I feel sad" }), false);
+    out.symbol({ text: "Burst" });
+    out.board("food");
+    out.phrase("I want to go home", [{ text: "I" }, { text: "want" }, { text: "go" }, { text: "home" }]);
+    await wait(200);
+    assert.deepEqual(got, ["Burst", "phrase:go"]);
+    assert.ok(game.source.capabilities.includes("sharing.limited"));
+    out.close();
+    game.close();
+
+    const bad = await fetch(`${http}/pairings`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vocabulary: ["x".repeat(65)] }) });
+    assert.equal(bad.status, 400);
+    const none = await claimPairing({ relay: http, code: (await createPairing({ relay: http })).code });
+    assert.equal(none.vocabulary, undefined);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("a revoked relay shows in statusOf even while another channel stays open", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http });
+    const { senderToken } = await claimPairing({ relay: http, code: p.code });
+    const local = memoryLink();
+    const game = createAacListener({ transports: [local.listener, relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket })] });
+    await wait(150);
+    await revokePairing({ relay: http, token: senderToken });
+    await wait(200);
+    assert.equal(game.status, "open", "the other channel is still open");
+    assert.equal(game.statusOf("relay"), "revoked");
+    assert.equal(game.statusOf("memory"), "open");
+    game.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("local play: --serve hands out the game site and the example AAC app, nothing outside them", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aac-serve-"));
+  writeFileSync(join(dir, "index.html"), "<h1>hub</h1>");
+  mkdirSync(join(dir, "assets"));
+  writeFileSync(join(dir, "assets", "a-123.js"), "export{}");
+  writeFileSync(join(dir, ".secret"), "no");
+  const { relay, http } = await start({ serveDir: dir });
+  try {
+    const home = await fetch(`${http}/`);
+    assert.equal(home.status, 200);
+    assert.match(home.headers.get("content-type"), /text\/html/);
+    assert.equal(await home.text(), "<h1>hub</h1>");
+    const asset = await fetch(`${http}/assets/a-123.js`);
+    assert.match(asset.headers.get("cache-control"), /immutable/);
+    assert.match(asset.headers.get("content-type"), /javascript/);
+    assert.equal((await fetch(`${http}/aac-bridge/examples/aac-app.html`)).status, 200);
+    assert.equal((await fetch(`${http}/aac-bridge/src/index.js`)).status, 200);
+    assert.equal((await fetch(`${http}/aac-bridge/relay/server.js`)).status, 404);
+    assert.equal((await fetch(`${http}/.secret`)).status, 404);
+    assert.equal((await fetch(`${http}/%2e%2e/%2e%2e/etc/passwd`)).status, 404);
+    assert.equal((await fetch(`${http}/..%2f..%2fpackage.json`)).status, 404);
+    assert.equal((await fetch(`${http}/healthz`)).status, 200);
+    assert.equal((await fetch(`${http}/pairings`, { method: "POST" })).status, 201);
+  } finally {
+    await relay.close();
+  }
+  const plain = await start();
+  try {
+    assert.equal((await fetch(`${plain.http}/aac-bridge/examples/aac-app.html`)).status, 404);
+  } finally {
+    await plain.relay.close();
   }
 });
