@@ -34,7 +34,7 @@ import { createServer } from "node:http";
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { createReadStream, statSync } from "node:fs";
 import { networkInterfaces } from "node:os";
-import { dirname, extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocketServer } from "ws";
 
@@ -188,8 +188,10 @@ export function createRelay({
       req.on("error", () => resolve(null));
     });
 
-  // Static files for local play. Only GET/HEAD, only inside the given folder
-  // (or this package's examples/ and src/ under /aac-bridge/), no dotfiles.
+  // Static files for local play. Only GET/HEAD, only inside the given folder,
+  // or exactly this package's examples/ or src/ folder under /aac-bridge/.
+  // No dotfiles. Backslashes are refused outright: Windows treats them as
+  // separators, so "%5c..%5c" would otherwise slip past the segment checks.
   const fileFor = (urlPath) => {
     let p;
     try {
@@ -197,15 +199,18 @@ export function createRelay({
     } catch {
       return null;
     }
-    if (p.includes("\0") || p.split("/").some((seg) => seg.startsWith("."))) return null;
+    if (p.includes("\0") || p.includes("\\") || p.split("/").some((seg) => seg.startsWith("."))) return null;
     let root = staticRoot;
-    if (serveExamples && /^\/aac-bridge\/(examples|src)\//.test(p)) {
-      root = PACKAGE_ROOT;
-      p = p.slice("/aac-bridge".length);
-    }
+    const pkg = serveExamples ? /^\/aac-bridge\/(examples|src)(\/.*)$/.exec(p) : null;
+    if (pkg) {
+      root = join(PACKAGE_ROOT, pkg[1]);
+      p = pkg[2];
+    } else if (p.startsWith("/aac-bridge/")) return null;
     if (!root) return null;
     let full = resolve(join(root, p));
     if (full !== root && !full.startsWith(root + sep)) return null;
+    // Second guard, after normalization: no dot segment anywhere under the root.
+    if (relative(root, full).split(/[\\/]/).some((seg) => seg.startsWith("."))) return null;
     try {
       let st = statSync(full);
       if (st.isDirectory()) {

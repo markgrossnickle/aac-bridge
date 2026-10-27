@@ -22,7 +22,7 @@ user's consent:
                                    └─ BroadcastChannel (same site)  ──┘
 ```
 
-Status: 0.3.0, draft protocol v1. Feedback from AAC app makers is very
+Status: 0.3.1, draft protocol v1. Feedback from AAC app makers is very
 welcome; see [Feedback wanted](#feedback-wanted).
 
 ## For game developers
@@ -30,7 +30,7 @@ welcome; see [Feedback wanted](#feedback-wanted).
 Not on npm yet. Pin a tagged release from GitHub:
 
 ```bash
-npm install github:markgrossnickle/aac-bridge#v0.3.0
+npm install github:markgrossnickle/aac-bridge#v0.3.1
 ```
 
 ```js

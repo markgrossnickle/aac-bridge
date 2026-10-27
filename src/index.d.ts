@@ -74,6 +74,8 @@ export interface Transport {
     presence?: (present: boolean) => void;
   }): void;
   send?(event: unknown): void;
+  /** Drop anything waiting to be sent (transports that queue, like the relay). */
+  clear?(): void;
   stop(): void;
 }
 type WindowLike = Window | HTMLIFrameElement | (() => Window | HTMLIFrameElement | null | undefined);

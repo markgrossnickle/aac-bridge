@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Local play server: refuse backslashes in request paths (Windows treats them
+  as separators, so an encoded `%5c..%5c` could reach dotfiles and other
+  package files), serve `/aac-bridge/examples/` and `/aac-bridge/src/` from
+  exactly those folders, and re-check for dot segments after normalizing.
+- Limited sharing: turning a limit on now also discards anything still queued
+  for sending (for example speech queued while the relay was connecting), so
+  the new scope covers everything that has not left the device. Transports
+  may implement `clear()`; the relay transport does.
+
 ## 0.3.0
 
 - Relay: a client sending an oversized or malformed frame is disconnected
