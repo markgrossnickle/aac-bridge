@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import WebSocket from "ws";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRelay } from "./server.js";
@@ -10,7 +10,9 @@ import {
   createAacEmitter,
   createAacListener,
   createPairing,
+  listGames,
   memoryLink,
+  requestPairing,
   relayTransport,
   revokePairing,
 } from "../src/index.js";
@@ -525,6 +527,198 @@ test("a listener whose own link drops learns again that sharing is on when it re
     assert.deepEqual(hellos, [false, true], "the replayed hello is delivered although its id was seen");
     out.close();
     game.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+// ---- 0.4: tap-to-allow pairing, remembered pairings ----
+
+/** A game waiting in a discoverable pairing, answering requests with `decide`. */
+async function waitingGame(http, { name = "Living room laptop", decide = () => true, remember = true } = {}) {
+  const p = await createPairing({ relay: http, name, discoverable: true, remember, vocabulary: ["go"] });
+  const listener = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }) });
+  const seen = { requests: [], done: [] };
+  listener.on("request", (r) => {
+    seen.requests.push(r);
+    if (decide(r)) listener.approve(r.id);
+    else listener.deny(r.id);
+  });
+  listener.on("request-done", (d) => seen.done.push(d));
+  await wait(150);
+  return { p, listener, seen };
+}
+
+test("tap to allow: an AAC app lists the waiting game, asks, and the game allows", async () => {
+  const { relay, http } = await start({ discovery: true });
+  try {
+    const game = await waitingGame(http);
+    assert.equal(game.p.discoverable, true);
+    assert.equal(game.p.remembered, true);
+    const games = await listGames({ relay: http });
+    assert.deepEqual(games.map((g) => g.name), ["Living room laptop"]);
+    const s = await requestPairing({ relay: http, game: games[0].id, app: "cboard", device: "Kitchen tablet", pollMs: 50 });
+    assert.equal(typeof s.senderToken, "string");
+    assert.deepEqual(s.vocabulary, ["go"]);
+    assert.equal(s.name, "Living room laptop");
+    assert.equal(s.remembered, true);
+    assert.deepEqual(game.seen.requests.map((r) => [r.app, r.device]), [["cboard", "Kitchen tablet"]]);
+    assert.deepEqual(game.seen.done.map((d) => d.approved), [true]);
+    assert.deepEqual(await listGames({ relay: http }), [], "a paired game is no longer listed");
+
+    const words = [];
+    game.listener.on("symbol", (d) => words.push(d.symbol.text));
+    const out = createAacEmitter({ app: { app: "cboard" }, transport: relayTransport({ relay: http, token: s.senderToken, WebSocketImpl: WebSocket }) });
+    out.enable();
+    await wait(200);
+    out.symbol({ text: "go" });
+    await wait(150);
+    assert.deepEqual(words, ["go"]);
+    // The code from the same pairing no longer works once allowed.
+    await assert.rejects(claimPairing({ relay: http, code: game.p.code }), /unknown or expired code/);
+    out.close();
+    game.listener.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("tap to allow: the game can say no, and stays listed", async () => {
+  const { relay, http } = await start({ discovery: true });
+  try {
+    const game = await waitingGame(http, { decide: () => false });
+    const [g] = await listGames({ relay: http });
+    await assert.rejects(requestPairing({ relay: http, game: g.id, app: "someone", pollMs: 50 }), (err) => err.reason === "denied");
+    assert.equal((await listGames({ relay: http })).length, 1);
+    game.listener.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("discovery is off on a relay that is not serving local play", async () => {
+  const { relay, http } = await start();
+  try {
+    const p = await createPairing({ relay: http, name: "x", discoverable: true });
+    assert.equal(p.discoverable, false);
+    await assert.rejects(listGames({ relay: http }), /discovery is off/);
+    const res = await fetch(`${http}/pairings/request`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ game: "abc", app: "x" }) });
+    assert.equal(res.status, 404);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("only that game's own listener can allow a request; a game is listed only while open", async () => {
+  const { relay, http, ws } = await start({ discovery: true });
+  try {
+    const a = await createPairing({ relay: http, name: "A", discoverable: true });
+    assert.deepEqual(await listGames({ relay: http }), [], "no listener connected yet, so not listed");
+    const aSock = await rawAuth(ws, a.listenerToken);
+    const b = await createPairing({ relay: http, name: "B", discoverable: true });
+    const bSock = await rawAuth(ws, b.listenerToken);
+    const [ga] = (await listGames({ relay: http })).filter((g) => g.name === "A");
+    const started = await (await fetch(`${http}/pairings/request`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ game: ga.id, app: "cboard" }) })).json();
+    await wait(100);
+    const req = aSock.control.find((m) => m.relay === "request");
+    assert.equal(req.request.app, "cboard");
+    assert.equal(bSock.control.some((m) => m.relay === "request"), false, "B never hears about A's request");
+    bSock.socket.send(JSON.stringify({ relay: "approve", request: started.requestId })); // B tries to approve A's request
+    await wait(100);
+    const poll = async () => (await fetch(`${http}/pairings/request/${started.requestId}`, { headers: { Authorization: `Bearer ${started.pollToken}` } })).json();
+    assert.deepEqual(await poll(), { status: "pending" });
+    const wrong = await fetch(`${http}/pairings/request/${started.requestId}`, { headers: { Authorization: "Bearer wrong-token-0000000000000000" } });
+    assert.equal(wrong.status, 404, "polling needs the request's own token");
+    aSock.socket.send(JSON.stringify({ relay: "approve", request: started.requestId }));
+    await wait(100);
+    const done = await poll();
+    assert.equal(done.status, "approved");
+    assert.equal(typeof done.senderToken, "string");
+    assert.equal((await fetch(`${http}/pairings/request/${started.requestId}`, { headers: { Authorization: `Bearer ${started.pollToken}` } })).status, 404, "a token is handed out once");
+    aSock.socket.close();
+    bSock.socket.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("a waiting game accepts at most a few pending requests", async () => {
+  const { relay, http } = await start({ discovery: true, maxRequestsPerPairing: 2, requestPerMinutePerIp: 50 });
+  try {
+    // A game that hears requests but never answers them.
+    const p = await createPairing({ relay: http, name: "Quiet", discoverable: true });
+    const quiet = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }) });
+    await wait(150);
+    const [q] = await listGames({ relay: http });
+    const ask = () => fetch(`${http}/pairings/request`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ game: q.id, app: "x" }) });
+    assert.deepEqual([(await ask()).status, (await ask()).status, (await ask()).status], [202, 202, 429]);
+    quiet.close();
+  } finally {
+    await relay.close();
+  }
+});
+
+test("a remembered pairing survives a relay restart; the saved file holds no tokens", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "aac-state-"));
+  const stateFile = join(dir, "pairings.json");
+  const first = await start({ stateFile });
+  const p = await createPairing({ relay: first.http, remember: true, vocabulary: ["go"], name: "Laptop" });
+  const s = await claimPairing({ relay: first.http, code: p.code });
+  const temp = await createPairing({ relay: first.http }); // not remembered
+  const tempClaim = await claimPairing({ relay: first.http, code: temp.code });
+  const port = first.relay.port;
+  await first.relay.close();
+
+  const text = readFileSync(stateFile, "utf8");
+  for (const secret of [p.listenerToken, s.senderToken, tempClaim.senderToken]) assert.equal(text.includes(secret), false);
+  assert.equal(JSON.parse(text).pairings.length, 1, "only the remembered pairing is saved");
+
+  const again = createRelay({ port, host: "127.0.0.1", log: () => {}, stateFile });
+  await again.ready;
+  const http = `http://127.0.0.1:${port}`;
+  try {
+    const game = createAacListener({ transport: relayTransport({ relay: http, token: p.listenerToken, WebSocketImpl: WebSocket }), vocabulary: ["go"] });
+    const words = [];
+    game.on("word", (d) => words.push(d.word));
+    await wait(150);
+    assert.equal(game.statusOf("relay"), "open");
+    const out = createAacEmitter({ app: { app: "cboard" }, transport: relayTransport({ relay: http, token: s.senderToken, WebSocketImpl: WebSocket }) });
+    out.enable();
+    await wait(200);
+    out.symbol({ text: "go" });
+    await wait(150);
+    assert.deepEqual(words, ["go"]);
+    const old = createAacListener({ transport: relayTransport({ relay: http, token: temp.listenerToken, WebSocketImpl: WebSocket }) });
+    await wait(200);
+    assert.equal(old.statusOf("relay"), "unauthorized", "an ordinary pairing does not survive a restart");
+    old.close();
+    out.close();
+    game.close();
+    // Revoking removes it from the file too.
+    await revokePairing({ relay: http, token: s.senderToken });
+    assert.equal(JSON.parse(readFileSync(stateFile, "utf8")).pairings.length, 0);
+  } finally {
+    await again.close();
+  }
+});
+
+test("a remembered pairing slides its expiry forward when used; an ordinary one lasts 12 hours", async () => {
+  let clock = Date.now();
+  const { relay, http, ws } = await start({ now: () => clock });
+  try {
+    const kept = await createPairing({ relay: http, remember: true });
+    const plain = await createPairing({ relay: http });
+    const keptSender = await claimPairing({ relay: http, code: kept.code });
+    await claimPairing({ relay: http, code: plain.code });
+    const day = 24 * 60 * 60_000;
+    assert.ok(kept.expiresAt - clock > 80 * day);
+    assert.ok(plain.expiresAt - clock <= 12 * 60 * 60_000);
+    clock += 60 * day;
+    const reconnect = await rawAuth(ws, keptSender.senderToken);
+    assert.ok(reconnect.reply.expiresAt - clock > 80 * day, "used again after 60 days: good for another 90");
+    reconnect.socket.close();
+    relay.sweep();
+    assert.equal(relay.size, 1, "the ordinary pairing expired");
   } finally {
     await relay.close();
   }

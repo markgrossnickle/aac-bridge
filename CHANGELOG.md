@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- **Tap to allow** (local relays): `createPairing({ discoverable: true, name })`
+  lists the game on `GET /games` while its dialog is open. An AAC app calls
+  `listGames()` and `requestPairing()`; the game hears a `request` event
+  and answers with `listener.approve(id)` or `deny(id)`. No typing.
+  Discovery is on only with `--serve` (or `discovery: true`).
+- **Remembered pairings:** `createPairing({ remember: true })` lasts until
+  revoked, sliding 90 days from last use. With `stateFile` (local play
+  default `~/.aac-bridge/relay-pairings.json`) they survive a relay restart,
+  saved as token hashes only.
+- **QR codes:** `pairingLink({ relay, code })` and `parsePairingLink()`. A
+  link fills in the code; it never pairs or shares by itself.
+- The example AAC app lists nearby games, waits for Allow, fills in a code
+  from a QR link, and remembers the pairing.
+- Relay: `/healthz` reports `discovery`; CORS allows GET; `--state`,
+  `--no-state`, `--discovery`, `--no-discovery`; saves on SIGINT/SIGTERM.
+
 ## 0.3.1
 
 - Local play server: refuse backslashes in request paths (Windows treats them

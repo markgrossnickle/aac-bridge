@@ -72,11 +72,21 @@ export interface Transport {
     status?: (state: TransportState, detail?: string) => void;
     /** Transports that know whether the AAC app is connected (the relay) report it here. */
     presence?: (present: boolean) => void;
+    /** Relay pairing requests reaching a listener (tap-to-allow pairing). */
+    control?: (event: { type: "request"; request: PairingRequest } | { type: "request-done"; request: string; approved: boolean }) => void;
   }): void;
   send?(event: unknown): void;
   /** Drop anything waiting to be sent (transports that queue, like the relay). */
   clear?(): void;
+  /** Send a relay control message now (a listener answering a pairing request). */
+  control?(msg: { relay: "approve" | "deny"; request: string }): boolean;
   stop(): void;
+}
+export interface PairingRequest {
+  id: string;
+  /** Self-reported by the AAC app: show it, but the user decides. */
+  app: string;
+  device: string;
 }
 type WindowLike = Window | HTMLIFrameElement | (() => Window | HTMLIFrameElement | null | undefined);
 export declare function postMessageTransport(opts: { origin: string | string[]; source?: WindowLike; target?: WindowLike; win?: Window }): Transport;
@@ -84,11 +94,39 @@ export declare function broadcastTransport(opts?: { channel?: string }): Transpo
 export declare function relayTransport(opts: { url?: string; relay?: string; token: string; WebSocketImpl?: typeof WebSocket; maxQueue?: number; queueTtlMs?: number }): Transport;
 export declare function memoryLink(): { sender: Transport; listener: Transport };
 
-export interface Pairing { code: string; listenerToken: string; codeExpiresAt: number; expiresAt: number }
-/** Game side. Pass the game's `vocabulary` so the AAC app can offer "share only the game's words". */
-export declare function createPairing(opts: { relay: string; vocabulary?: VocabularyEntry[] | Vocabulary; fetchImpl?: typeof fetch }): Promise<Pairing>;
-/** AAC app side. `vocabulary` is the game's word list, if it sent one. */
-export declare function claimPairing(opts: { relay: string; code: string; fetchImpl?: typeof fetch }): Promise<{ senderToken: string; expiresAt: number; vocabulary?: string[] }>;
+export interface Pairing { code: string; listenerToken: string; codeExpiresAt: number; expiresAt: number; discoverable: boolean; remembered: boolean }
+export interface SenderPairing { senderToken: string; expiresAt: number; remembered: boolean; vocabulary?: string[]; name?: string }
+/**
+ * Game side. `vocabulary`: the game's words, so the AAC app can share only those.
+ * `name`: shown to AAC apps. `discoverable`: list it for tap-to-allow pairing (local relays).
+ * `remember`: keep the pairing until revoked (90 days after last use).
+ */
+export declare function createPairing(opts: {
+  relay: string;
+  vocabulary?: VocabularyEntry[] | Vocabulary;
+  name?: string;
+  discoverable?: boolean;
+  remember?: boolean;
+  fetchImpl?: typeof fetch;
+}): Promise<Pairing>;
+/** AAC app side, by code (typed, or read from the game's QR code). */
+export declare function claimPairing(opts: { relay: string; code: string; fetchImpl?: typeof fetch }): Promise<SenderPairing>;
+/** AAC app side: games waiting to be paired on a local relay. */
+export declare function listGames(opts: { relay: string; fetchImpl?: typeof fetch }): Promise<Array<{ id: string; name: string }>>;
+/** AAC app side: ask a listed game to pair and wait for its user to allow. Rejects with `reason` "denied", "timeout" or "cancelled". */
+export declare function requestPairing(opts: {
+  relay: string;
+  game: string;
+  app: string;
+  device?: string;
+  pollMs?: number;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}): Promise<SenderPairing>;
+/** A link for a QR code next to the code: opens the AAC page with the code filled in. Never pairs or shares by itself. */
+export declare function pairingLink(opts: { relay: string; code: string; page?: string }): string;
+/** Read { relay, code } from a pairing link, or { relay: null, code } from a bare 6-digit code. */
+export declare function parsePairingLink(text: string): { relay: string | null; code: string } | null;
 /** Flatten vocabulary entries to the plain word list sent with a pairing. */
 export declare function vocabularyWords(entries?: VocabularyEntry[] | Vocabulary): string[] | undefined;
 export declare function revokePairing(opts: { relay: string; token: string; fetchImpl?: typeof fetch }): Promise<void>;
@@ -107,6 +145,10 @@ export interface ListenerEvents {
   lost: { session: string };
   /** A transport that can tell (the relay) says whether the AAC app is connected. */
   presence: { present: boolean; transport: string };
+  /** An AAC app asks to pair (tap-to-allow). Answer with approve(id) or deny(id). */
+  request: PairingRequest & { transport: string };
+  /** A pairing request was answered (here or in another tab) or expired. */
+  "request-done": { id: string; approved: boolean; transport: string };
   status: { state: "idle" | TransportState; transport: string; transportState: TransportState; detail?: string };
   gap: { session: string; expected: number; got: number };
   stale: { ageMs: number; event: AacEvent };
@@ -122,6 +164,10 @@ export interface AacListener {
   statusOf(name: string): TransportState | undefined;
   /** Whether a transport that can tell says the AAC app is connected. */
   presenceOf(name: string): boolean | undefined;
+  /** Allow a pairing request from a "request" event. */
+  approve(id: string): boolean;
+  /** Refuse a pairing request. */
+  deny(id: string): boolean;
   readonly source: (AacSource & { capabilities: string[]; session: string }) | null;
   readonly vocabulary: Vocabulary | null;
   close(): void;

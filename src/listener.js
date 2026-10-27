@@ -169,13 +169,18 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
         presence.set(t.name, present);
         emit("presence", { present, transport: t.name });
       },
+      // Tap-to-allow pairing: an AAC app asks to join; the game asks its user.
+      control: (c) => {
+        if (c.type === "request") emit("request", { id: c.request.id, app: c.request.app, device: c.request.device || "", transport: t.name });
+        else if (c.type === "request-done") emit("request-done", { id: c.request, approved: c.approved, transport: t.name });
+      },
     });
   });
 
   return {
     /**
      * Subscribe: "word", "symbol", "phrase", "board", "hello", "bye", "lost",
-     * "presence", "status", "gap", "stale", or "*". Returns an unsubscribe function.
+     * "presence", "request", "request-done", "status", "gap", "stale", or "*". Returns an unsubscribe function.
      */
     on(name, fn) {
       if (!handlers.has(name)) handlers.set(name, new Set());
@@ -206,6 +211,14 @@ export function createAacListener({ transport, transports, vocabulary, onInvalid
     /** Whether a transport that can tell (the relay) says the AAC app is connected: true, false, or undefined. */
     presenceOf(name) {
       return presence.get(name);
+    },
+    /** Allow a pairing request (from a "request" event). Returns whether it was sent. */
+    approve(id) {
+      return list.some((t) => t.control?.({ relay: "approve", request: id }));
+    },
+    /** Refuse a pairing request. Returns whether it was sent. */
+    deny(id) {
+      return list.some((t) => t.control?.({ relay: "deny", request: id }));
     },
     /** What the AAC app said about itself in session.hello, or null. */
     get source() {

@@ -4,6 +4,9 @@
 // A transport is: { name, start({ message, status, presence }), send?(event), stop() }
 //   message(data, meta)   called with each received message (object or string)
 //   status(state, detail) "connecting" | "open" | "closed" | "error" | "revoked" | "unauthorized"
+//   control(event)        optional; relay pairing requests for a listener:
+//                         { type: "request", request: { id, app, device } } or
+//                         { type: "request-done", request, approved }
 //   presence(present)     optional; a transport that knows whether the AAC app
 //                         is connected (the relay) reports it here
 //
@@ -117,7 +120,7 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
   let delay = 500;
   let timer = null;
   let queue = [];
-  let handlers = { message: noop, status: noop, presence: noop };
+  let handlers = { message: noop, status: noop, presence: noop, control: noop };
 
   const fresh = () => {
     const cutoff = Date.now() - queueTtlMs;
@@ -170,6 +173,8 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
         }
         if (msg.relay === "presence") handlers.presence(Boolean(msg.sender));
         else if (msg.relay === "replay" && msg.event) handlers.message(msg.event, { relay: true, replay: true });
+        else if (msg.relay === "request" && msg.request) handlers.control({ type: "request", request: msg.request });
+        else if (msg.relay === "request-done") handlers.control({ type: "request-done", request: msg.request, approved: Boolean(msg.approved) });
         return;
       }
       handlers.message(text, { relay: true });
@@ -199,7 +204,7 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
   return {
     name: "relay",
     start(h = {}) {
-      handlers = { message: h.message ?? noop, status: h.status ?? noop, presence: h.presence ?? noop };
+      handlers = { message: h.message ?? noop, status: h.status ?? noop, presence: h.presence ?? noop, control: h.control ?? noop };
       if (finished) {
         handlers.status("unauthorized", "pairing ended; pair again");
         return;
@@ -216,6 +221,12 @@ export function relayTransport({ url, relay, token, WebSocketImpl, maxQueue = 50
     /** Drop everything waiting to be sent (the sharing scope narrowed). */
     clear() {
       queue = [];
+    },
+    /** Send a relay control message now (a listener answering a pairing request). Returns whether it went out. */
+    control(msg) {
+      if (!socket || !authed || socket.readyState !== 1) return false;
+      socket.send(JSON.stringify(msg));
+      return true;
     },
     stop() {
       stopped = true;

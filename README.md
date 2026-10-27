@@ -22,7 +22,7 @@ user's consent:
                                    └─ BroadcastChannel (same site)  ──┘
 ```
 
-Status: 0.3.1, draft protocol v1. Feedback from AAC app makers is very
+Status: 0.4.0, draft protocol v1. Feedback from AAC app makers is very
 welcome; see [Feedback wanted](#feedback-wanted).
 
 ## For game developers
@@ -30,18 +30,22 @@ welcome; see [Feedback wanted](#feedback-wanted).
 Not on npm yet. Pin a tagged release from GitHub:
 
 ```bash
-npm install github:markgrossnickle/aac-bridge#v0.3.1
+npm install github:markgrossnickle/aac-bridge#v0.4.0
 ```
 
 ```js
-import { createAacListener, createPairing, relayTransport, mountDevPanel } from "aac-bridge";
+import { createAacListener, createPairing, pairingLink, relayTransport, mountDevPanel } from "aac-bridge";
 
 const words = ["yes", "no", { word: "jump", synonyms: ["hop"] }, "more"];
 
-// Once: ask the relay for a pairing, show the code, keep the token. Sending
-// your words lets the AAC app offer "share only the game's words".
-const { code, listenerToken } = await createPairing({ relay: "https://relay.example.org", vocabulary: words });
-showPairingCode(code); // the user types it into their AAC app
+// Once: ask the relay for a pairing, show the code (and a QR of pairingLink()),
+// keep the token. Your words let the AAC app share only those; remember keeps
+// the pairing until someone revokes it. On a local relay, discoverable lets an
+// AAC app list this game and ask to join; you answer with approve() or deny().
+const { code, listenerToken } = await createPairing({
+  relay: "https://relay.example.org", vocabulary: words, name: "Space Jump", remember: true, discoverable: true,
+});
+showPairingCode(code, pairingLink({ relay: "https://relay.example.org", code }));
 
 const aac = createAacListener({
   transport: relayTransport({ relay: "https://relay.example.org", token: listenerToken }),
@@ -52,6 +56,7 @@ aac.on("word", ({ word }) => {
   if (word === "jump") player.jump();
 });
 aac.on("phrase", ({ text, words }) => showSpeechBubble(text));
+aac.on("request", ({ id, app, device }) => (confirm(`Allow ${app} (${device})?`) ? aac.approve(id) : aac.deny(id)));
 // "Someone is sharing" comes from hello/bye/lost and relay presence, not
 // from a channel being open.
 aac.on("hello", ({ source }) => setConnectedIcon(true, source.app));
@@ -94,12 +99,20 @@ Always keep touch controls too. AAC is another way to play, not a gate.
 ## For AAC apps
 
 ```js
-import { createAacEmitter, claimPairing, relayTransport } from "aac-bridge";
+import { createAacEmitter, claimPairing, listGames, requestPairing, parsePairingLink, relayTransport } from "aac-bridge";
 
-const { senderToken, vocabulary } = await claimPairing({ relay: "https://relay.example.org", code: codeTheUserTyped });
+const RELAY = "http://192.168.1.20:8787"; // a relay in the room, or an https:// one
+
+// Pair by tapping a nearby game (local relay): list them, the user taps one,
+// and the game's screen asks "Allow?".
+const games = await listGames({ relay: RELAY });
+const tapped = await showGameButtons(games);
+const { senderToken, vocabulary } = await requestPairing({ relay: RELAY, game: tapped.id, app: "myaac", device: "Kitchen tablet" });
+// Or by the game's QR code or its 6-digit code:
+//   await claimPairing({ relay: RELAY, code: parsePairingLink(scanned)?.code ?? typedCode })
 const share = createAacEmitter({
   app: { app: "myaac", version: "2.3.0", lang: "en-US" },
-  transports: [relayTransport({ relay: "https://relay.example.org", token: senderToken })],
+  transports: [relayTransport({ relay: RELAY, token: senderToken })],
 });
 shareSwitch.onchange = (on) => (on ? share.enable() : share.disable());
 onlyGameWordsSwitch.onchange = (on) => share.limitTo(on ? vocabulary : null); // default on
@@ -119,8 +132,8 @@ notes for Cboard) and `PRIVACY.md` before shipping.
 cd relay && npm install && npm start      # http://localhost:8787 (pairing) + ws://localhost:8787/ (streaming)
 ```
 
-Paired devices only (one-time code, a secret token per side, revocable,
-expiring), one way only (sender to listeners), size and rate limited, nothing
+Paired devices only (a one-time code or QR, or tap-to-allow on a local
+network; a secret token per side; revocable; remembered or expiring), one way only (sender to listeners), size and rate limited, nothing
 stored but the sender's current hello. Put it behind TLS and set
 `ALLOWED_ORIGINS` in production. Hosts that cannot hold WebSockets open (for
 example Vercel functions) will not work; any small Node host will.
